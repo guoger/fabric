@@ -14,17 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package main
+package utils
 
 import (
+	"runtime/debug"
+
 	"github.com/hyperledger/fabric/common/crypto"
 	"github.com/hyperledger/fabric/orderer/common/broadcast"
 	"github.com/hyperledger/fabric/orderer/common/deliver"
 	"github.com/hyperledger/fabric/orderer/configupdate"
 	"github.com/hyperledger/fabric/orderer/multichain"
 	ab "github.com/hyperledger/fabric/protos/orderer"
-
-	"runtime/debug"
 )
 
 type configUpdateSupport struct {
