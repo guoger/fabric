@@ -31,6 +31,7 @@ import (
 
 	"github.com/Shopify/sarama"
 	"github.com/hyperledger/fabric/common/localmsp"
+	"github.com/hyperledger/fabric/orderer/performance"
 	logging "github.com/op/go-logging"
 	"gopkg.in/alecthomas/kingpin.v2"
 )
@@ -41,34 +42,44 @@ var logger = logging.MustGetLogger("orderer/main")
 var (
 	app = kingpin.New("orderer", "Hyperledger Fabric orderer node")
 
-	start   = app.Command("start", "Start the orderer node").Default()
-	version = app.Command("version", "Show version information")
+	start     = app.Command("start", "Start the orderer node").Default()
+	version   = app.Command("version", "Show version information")
+	benchmark = app.Command("benchmark", "Run orderer in benchmark mode")
 )
 
 func main() {
-
 	kingpin.Version("0.0.1")
-	switch kingpin.MustParse(app.Parse(os.Args[1:])) {
+	fullCmd := kingpin.MustParse(app.Parse(os.Args[1:]))
 
+	// "version" command
+	if fullCmd == version.FullCommand() {
+		fmt.Println(metadata.GetVersionInfo())
+		return
+	}
+
+	conf := config.Load()
+	initializeLoggingLevel(conf)
+	utils.InitializeLocalMsp(conf)
+	signer := localmsp.NewSigner()
+	manager := utils.InitializeMultiChainManager(conf, signer)
+	server := utils.NewServer(manager, signer)
+
+	switch fullCmd {
 	// "start" command
 	case start.FullCommand():
 		logger.Infof("Starting %s", metadata.GetVersionInfo())
-		conf := config.Load()
-		initializeLoggingLevel(conf)
 		initializeProfilingService(conf)
 		grpcServer := utils.InitializeGrpcServer(conf)
-		utils.InitializeLocalMsp(conf)
-		signer := localmsp.NewSigner()
-		manager := utils.InitializeMultiChainManager(conf, signer)
-		server := utils.NewServer(manager, signer)
 		ab.RegisterAtomicBroadcastServer(grpcServer.Server(), server)
 		logger.Info("Beginning to serve requests")
 		grpcServer.Start()
-	// "version" command
-	case version.FullCommand():
-		fmt.Println(metadata.GetVersionInfo())
+	// "benchmark" command
+	case benchmark.FullCommand():
+		logger.Info("Starting orderer in benchmark mode")
+		benchmarkServer := performance.GetBenchmarkServer()
+		benchmarkServer.RegisterService(server)
+		benchmarkServer.Start()
 	}
-
 }
 
 // Set the logging level

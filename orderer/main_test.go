@@ -24,8 +24,7 @@ import (
 
 	"github.com/Shopify/sarama"
 	"github.com/hyperledger/fabric/common/flogging"
-	config "github.com/hyperledger/fabric/orderer/localconfig"
-	// logging "github.com/op/go-logging"
+	"github.com/hyperledger/fabric/orderer/localconfig"
 	"github.com/stretchr/testify/assert"
 )
 
