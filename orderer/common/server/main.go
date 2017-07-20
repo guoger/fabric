@@ -34,7 +34,8 @@ import (
 	"github.com/Shopify/sarama"
 	"github.com/hyperledger/fabric/common/localmsp"
 	mspmgmt "github.com/hyperledger/fabric/msp/mgmt"
-	logging "github.com/op/go-logging"
+	"github.com/hyperledger/fabric/orderer/common/performance"
+	"github.com/op/go-logging"
 	"gopkg.in/alecthomas/kingpin.v2"
 )
 
@@ -44,34 +45,49 @@ var logger = logging.MustGetLogger("orderer/server/main")
 var (
 	app = kingpin.New("orderer", "Hyperledger Fabric orderer node")
 
-	start   = app.Command("start", "Start the orderer node").Default()
-	version = app.Command("version", "Show version information")
+	start     = app.Command("start", "Start the orderer node").Default()
+	version   = app.Command("version", "Show version information")
+	benchmark = app.Command("benchmark", "Run orderer in benchmark mode")
 )
 
+// Main is the entry point of orderer process
 func Main() {
-
 	kingpin.Version("0.0.1")
-	switch kingpin.MustParse(app.Parse(os.Args[1:])) {
+	fullCmd := kingpin.MustParse(app.Parse(os.Args[1:]))
 
-	// "start" command
-	case start.FullCommand():
+	// "version" command
+	if fullCmd == version.FullCommand() {
+		fmt.Println(metadata.GetVersionInfo())
+		return
+	}
+
+	conf := config.Load()
+	initializeLoggingLevel(conf)
+	initializeLocalMsp(conf)
+
+	Start(fullCmd, conf)
+}
+
+// Start provides a layer of abstraction for benchmark test
+func Start(cmd string, conf *config.TopLevel) {
+	signer := localmsp.NewSigner()
+	manager := initializeMultiChainManager(conf, signer)
+	server := NewServer(manager, signer)
+
+	switch cmd {
+	case start.FullCommand(): // "start" command
 		logger.Infof("Starting %s", metadata.GetVersionInfo())
-		conf := config.Load()
-		initializeLoggingLevel(conf)
 		initializeProfilingService(conf)
 		grpcServer := initializeGrpcServer(conf)
-		initializeLocalMsp(conf)
-		signer := localmsp.NewSigner()
-		manager := initializeMultiChainManager(conf, signer)
-		server := NewServer(manager, signer)
 		ab.RegisterAtomicBroadcastServer(grpcServer.Server(), server)
 		logger.Info("Beginning to serve requests")
 		grpcServer.Start()
-	// "version" command
-	case version.FullCommand():
-		fmt.Println(metadata.GetVersionInfo())
+	case benchmark.FullCommand(): // "benchmark" command
+		logger.Info("Starting orderer in benchmark mode")
+		benchmarkServer := performance.GetBenchmarkServer()
+		benchmarkServer.RegisterService(server)
+		benchmarkServer.Start()
 	}
-
 }
 
 // Set the logging level
@@ -146,7 +162,7 @@ func initializeBootstrapChannel(conf *config.TopLevel, lf ledger.Factory) {
 	// Select the bootstrapping mechanism
 	switch conf.General.GenesisMethod {
 	case "provisional":
-		genesisBlock = provisional.New(genesisconfig.Load(conf.General.GenesisProfile)).GenesisBlock()
+		genesisBlock = provisional.New(genesisconfig.Load(conf.General.GenesisProfile)).GenesisBlockForChannel(conf.General.SystemChannel)
 	case "file":
 		genesisBlock = file.New(conf.General.GenesisFile).GenesisBlock()
 	default:

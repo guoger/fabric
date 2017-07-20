@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 
 	bccsp "github.com/hyperledger/fabric/bccsp/factory"
+	"github.com/hyperledger/fabric/common/configtx/tool/provisional"
 )
 
 const (
@@ -74,6 +75,7 @@ type General struct {
 	TLS            TLS
 	GenesisMethod  string
 	GenesisProfile string
+	SystemChannel  string
 	GenesisFile    string
 	Profile        Profile
 	LogLevel       string
@@ -167,6 +169,7 @@ var defaults = TopLevel{
 		ListenPort:     7050,
 		GenesisMethod:  "provisional",
 		GenesisProfile: "SampleSingleMSPSolo",
+		SystemChannel:  provisional.TestChainID,
 		GenesisFile:    "genesisblock",
 		Profile: Profile{
 			Enabled: false,
