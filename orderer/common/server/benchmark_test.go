@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 	"io/ioutil"
+	"runtime/pprof"
 
 	"github.com/hyperledger/fabric/common/configtx/tool/localconfig"
 	"github.com/hyperledger/fabric/common/configtx/tool/provisional"
@@ -65,12 +66,19 @@ const (
 )
 
 var (
-	channelCounts             = []int{1, 10}
-	totalTx                   = []int{10000}
+	//channelCounts             = []int{1, 10}
+	//totalTx                   = []int{10000}
+	//messagesSizes             = []int{1}
+	//broadcastClientPerChannel = []int{1, 5, 10}
+	//deliverClientPerChannel   = []int{0, 5, 10}
+	//numOfOrderer              = []int{1, 5}
+
+	channelCounts             = []int{10}
+	totalTx                   = []int{50000}
 	messagesSizes             = []int{1}
-	broadcastClientPerChannel = []int{1, 5, 10}
-	deliverClientPerChannel   = []int{0, 5, 10}
-	numOfOrderer              = []int{1, 5}
+	broadcastClientPerChannel = []int{10}
+	deliverClientPerChannel   = []int{0}
+	numOfOrderer              = []int{5}
 
 	args = [][]int{
 		channelCounts,
@@ -83,7 +91,7 @@ var (
 
 	envvars = map[string]string{
 		"ORDERER_GENERAL_GENESISPROFILE":                            localconfig.SampleDevModeSolo,
-		"ORDERER_GENERAL_LEDGERTYPE":                                "json",
+		"ORDERER_GENERAL_LEDGERTYPE":                                "ram",
 		"ORDERER_GENERAL_LOGLEVEL":                                  "error",
 		localconfig.Prefix + "_ORDERER_BATCHSIZE_MAXMESSAGECOUNT":   strconv.Itoa(MaxMessageCount),
 		localconfig.Prefix + "_ORDERER_BATCHSIZE_ABSOLUTEMAXBYTES":  strconv.Itoa(AbsoluteMaxBytes) + " KB",
@@ -112,6 +120,15 @@ func TestOrdererBenchmarkSolo(t *testing.T) {
 		os.Setenv(key, value)
 	}
 
+	cpupprof, err := os.Create("/tmp/orderercpu.prof")
+	assert.NoError(t, err, "Should be able to create pprof file")
+
+	pprof.StartCPUProfile(cpupprof)
+	defer func() {
+		pprof.StopCPUProfile()
+		cpupprof.Close()
+	}()
+
 	for factors := range testArgs() {
 		t.Run("orderer_benchmark", func(t *testing.T) {
 			benchmarkBroadcast(
@@ -124,6 +141,11 @@ func TestOrdererBenchmarkSolo(t *testing.T) {
 				1, // For solo orderer, we should always have exactly one instance
 				multiplex,
 			)
+
+			mempprof, err := os.Create("/tmp/orderermem.prof")
+			defer mempprof.Close()
+			assert.NoError(t, err, "Should be able to create pprof file")
+			pprof.WriteHeapProfile(mempprof)
 		})
 	}
 }
