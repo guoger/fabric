@@ -103,13 +103,13 @@ type Orderer interface {
 
 // ChannelCapabilities defines the capabilities for a channel
 type ChannelCapabilities interface {
-	// Supported returns an error if there are uknown capabilities in this channel which are required
+	// Supported returns an error if there are unknown capabilities in this channel which are required
 	Supported() error
 }
 
 // ApplicationCapabilities defines the capabilities for the application portion of a channel
 type ApplicationCapabilities interface {
-	// Supported returns an error if there are uknown capabilities in this channel which are required
+	// Supported returns an error if there are unknown capabilities in this channel which are required
 	Supported() error
 }
 
@@ -119,7 +119,11 @@ type OrdererCapabilities interface {
 	// group's mod_policy to "" should be fixed or not.
 	SetChannelModPolicyDuringCreate() bool
 
-	// Supported returns an error if there are uknown capabilities in this channel which are required
+	// Resubmission specifies whether the v1.0 non-deterministic commitment of tx should be fixed by re-submitting
+	// the re-validated tx.
+	Resubmission() bool
+
+	// Supported returns an error if there are unknown capabilities in this channel which are required
 	Supported() error
 }
 
