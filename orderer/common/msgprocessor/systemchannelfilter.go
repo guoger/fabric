@@ -10,17 +10,20 @@ import (
 	"fmt"
 
 	"github.com/hyperledger/fabric/common/channelconfig"
-	configtxapi "github.com/hyperledger/fabric/common/configtx/api"
 	cb "github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/utils"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/pkg/errors"
 )
 
 // ChainCreator defines the methods necessary to simulate channel creation.
 type ChainCreator interface {
 	// NewChannelConfig returns a template config for a new channel.
-	NewChannelConfig(envConfigUpdate *cb.Envelope) (configtxapi.Manager, error)
+	NewChannelConfig(envConfigUpdate *cb.Envelope) (channelconfig.Resources, error)
+
+	// CreateBundle parses the config into resources
+	CreateBundle(channelID string, config *cb.Config) (channelconfig.Resources, error)
 
 	// ChannelsCount returns the count of channels which currently exist.
 	ChannelsCount() int
@@ -94,19 +97,41 @@ func (scf *SystemChainFilter) authorize(configEnvelope *cb.ConfigEnvelope) (*cb.
 		return nil, fmt.Errorf("updated config does not include a config update")
 	}
 
-	configManager, err := scf.cc.NewChannelConfig(configEnvelope.LastUpdate)
+	res, err := scf.cc.NewChannelConfig(configEnvelope.LastUpdate)
 	if err != nil {
 		return nil, fmt.Errorf("error constructing new channel config from update: %s", err)
 	}
 
-	newChannelConfigEnv, err := configManager.ProposeConfigUpdate(configEnvelope.LastUpdate)
+	newChannelConfigEnv, err := res.ConfigtxManager().ProposeConfigUpdate(configEnvelope.LastUpdate)
 	if err != nil {
 		return nil, fmt.Errorf("error proposing channel update to new channel config: %s", err)
 	}
 
-	err = configManager.Validate(newChannelConfigEnv)
+	err = res.ConfigtxManager().Validate(newChannelConfigEnv)
 	if err != nil {
 		return nil, fmt.Errorf("error applying channel update to new channel config: %s", err)
+	}
+
+	bundle, err := scf.cc.CreateBundle(res.ConfigtxManager().ChainID(), newChannelConfigEnv.Config)
+	if err != nil {
+		return nil, errors.Wrap(err, "config does not validly parse")
+	}
+
+	if err = res.ValidateNew(bundle); err != nil {
+		return nil, errors.Wrap(err, "new bundle invalid")
+	}
+
+	oc, ok := bundle.OrdererConfig()
+	if !ok {
+		return nil, errors.New("config is missing orderer group")
+	}
+
+	if err = oc.Capabilities().Supported(); err != nil {
+		return nil, errors.Wrap(err, "config update is not compatible")
+	}
+
+	if err = bundle.ChannelConfig().Capabilities().Supported(); err != nil {
+		return nil, errors.Wrap(err, "config update is not compatible")
 	}
 
 	return newChannelConfigEnv, nil

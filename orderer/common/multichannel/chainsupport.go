@@ -14,6 +14,8 @@ import (
 	"github.com/hyperledger/fabric/orderer/consensus"
 	cb "github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/utils"
+
+	"github.com/pkg/errors"
 )
 
 // ChainSupport holds the resources for a particular channel.
@@ -104,6 +106,18 @@ func (cs *ChainSupport) ProposeConfigUpdate(configtx *cb.Envelope) (*cb.ConfigEn
 	bundle, err := cs.CreateBundle(cs.ChainID(), env.Config)
 	if err != nil {
 		return nil, err
+	}
+	if err = bundle.ChannelConfig().Capabilities().Supported(); err != nil {
+		return nil, errors.Wrap(err, "config update is not compatible")
+	}
+
+	oc, ok := bundle.OrdererConfig()
+	if !ok {
+		return nil, errors.New("updated config does not contain an orderer section")
+	}
+
+	if err = oc.Capabilities().Supported(); err != nil {
+		return nil, errors.Wrap(err, "config update is not compatible")
 	}
 	return env, cs.ValidateNew(bundle)
 }

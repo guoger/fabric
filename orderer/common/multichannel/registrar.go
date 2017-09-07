@@ -14,7 +14,6 @@ import (
 
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/configtx"
-	configtxapi "github.com/hyperledger/fabric/common/configtx/api"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/orderer/common/ledger"
 	"github.com/hyperledger/fabric/orderer/common/msgprocessor"
@@ -55,6 +54,16 @@ func (cr *configResources) CreateBundle(channelID string, config *cb.Config) (*c
 
 func (cr *configResources) Update(bndl *channelconfig.Bundle) {
 	channelconfig.LogSanityChecks(bndl)
+	oc, ok := bndl.OrdererConfig()
+	if !ok {
+		logger.Panicf("[channel %s] Config does not contain orderer config", bndl.ConfigtxManager().ChainID())
+	}
+	if err := oc.Capabilities().Supported(); err != nil {
+		logger.Panicf("[channel %s] Config requires unsupported capabilities: %s", bndl.ConfigtxManager().ChainID(), err)
+	}
+	if err := bndl.ChannelConfig().Capabilities().Supported(); err != nil {
+		logger.Panicf("[channel %s] Config requires unsupported capabilities: %s", bndl.ConfigtxManager().ChainID(), err)
+	}
 	cr.mutableResources.Update(bndl)
 }
 
@@ -266,6 +275,11 @@ func (r *Registrar) ChannelsCount() int {
 }
 
 // NewChannelConfig produces a new template channel configuration based on the system channel's current config.
-func (r *Registrar) NewChannelConfig(envConfigUpdate *cb.Envelope) (configtxapi.Manager, error) {
+func (r *Registrar) NewChannelConfig(envConfigUpdate *cb.Envelope) (channelconfig.Resources, error) {
 	return r.templator.NewChannelConfig(envConfigUpdate)
+}
+
+// CreateBundle calls channelconfig.NewBundle
+func (r *Registrar) CreateBundle(channelID string, config *cb.Config) (channelconfig.Resources, error) {
+	return channelconfig.NewBundle(channelID, config)
 }
