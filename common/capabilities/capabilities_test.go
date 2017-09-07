@@ -24,6 +24,7 @@ func TestSatisfied(t *testing.T) {
 		var capsMap map[string]*cb.Capability
 		for _, provider := range []*Registry{
 			NewChannel(capsMap).Registry,
+			NewOrderer(capsMap).Registry,
 		} {
 			assert.Nil(t, provider.Supported())
 		}
@@ -40,6 +41,7 @@ func TestSatisfied(t *testing.T) {
 		}
 		for _, provider := range []*Registry{
 			NewChannel(capsMap).Registry,
+			NewOrderer(capsMap).Registry,
 		} {
 			assert.Nil(t, provider.Supported())
 		}
@@ -54,6 +56,7 @@ func TestNotSatisfied(t *testing.T) {
 	}
 	for _, provider := range []*Registry{
 		NewChannel(capsMap).Registry,
+		NewOrderer(capsMap).Registry,
 	} {
 		assert.Error(t, provider.Supported())
 	}
