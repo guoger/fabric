@@ -84,18 +84,20 @@ const (
 
 // TopLevel consists of the structs used by the configtxgen tool.
 type TopLevel struct {
-	Profiles      map[string]*Profile `yaml:"Profiles"`
-	Organizations []*Organization     `yaml:"Organizations"`
-	Application   *Application        `yaml:"Application"`
-	Orderer       *Orderer            `yaml:"Orderer"`
+	Profiles      map[string]*Profile        `yaml:"Profiles"`
+	Organizations []*Organization            `yaml:"Organizations"`
+	Application   *Application               `yaml:"Application"`
+	Orderer       *Orderer                   `yaml:"Orderer"`
+	Capabilities  map[string]map[string]bool `yaml:"Capabilities"`
 }
 
 // Profile encodes orderer/application configuration combinations for the configtxgen tool.
 type Profile struct {
-	Consortium  string                 `yaml:"Consortium"`
-	Application *Application           `yaml:"Application"`
-	Orderer     *Orderer               `yaml:"Orderer"`
-	Consortiums map[string]*Consortium `yaml:"Consortiums"`
+	Consortium   string                 `yaml:"Consortium"`
+	Application  *Application           `yaml:"Application"`
+	Orderer      *Orderer               `yaml:"Orderer"`
+	Consortiums  map[string]*Consortium `yaml:"Consortiums"`
+	Capabilities map[string]bool        `yaml:"Capabilities"`
 }
 
 // Consortium represents a group of organizations which may create channels with eachother
@@ -106,6 +108,7 @@ type Consortium struct {
 // Application encodes the application-level configuration needed in config transactions.
 type Application struct {
 	Organizations []*Organization `yaml:"Organizations"`
+	Capabilities  map[string]bool `yaml:"Capabilities"`
 }
 
 // Organization encodes the organization-level configuration needed in config transactions.
@@ -127,12 +130,6 @@ type AnchorPeer struct {
 	Port int    `yaml:"Port"`
 }
 
-// ApplicationOrganization ...
-// TODO This should probably be removed
-type ApplicationOrganization struct {
-	Organization `yaml:"Organization"`
-}
-
 // Orderer contains configuration which is used for the
 // bootstrapping of an orderer by the provisional bootstrapper.
 type Orderer struct {
@@ -143,6 +140,7 @@ type Orderer struct {
 	Kafka         Kafka           `yaml:"Kafka"`
 	Organizations []*Organization `yaml:"Organizations"`
 	MaxChannels   uint64          `yaml:"MaxChannels"`
+	Capabilities  map[string]bool `yaml:"Capabilities"`
 }
 
 // BatchSize contains configuration affecting the size of batches.
