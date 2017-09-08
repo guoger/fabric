@@ -275,6 +275,10 @@ Capabilities:
     # Orderer capabilities apply only to the orderers, and may be safely
     # manipulated without concern for upgrading peers
     Orderer: &OrdererCapabilities
+        # V1.1_Orderer_BugFixes is a catchall flag for behavior which has been determined
+        # to be a bug in v1.0.x, but which modifying would cause imcompatibilities.  Users
+        # should leave this flag set to true.
+        V1.1_Orderer_BugFixes: true
 
     # Application capabilities apply only to the peer network, and may be safely
     # manipulated without concern for upgrading orderers
