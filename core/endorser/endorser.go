@@ -100,7 +100,7 @@ type Endorser struct {
 func NewEndorserServer(privDist privateDataDistributor, s Support) pb.EndorserServer {
 	e := &Endorser{
 		distributePrivateData: privDist,
-		s: s,
+		s:                     s,
 	}
 	return e
 }
@@ -117,10 +117,16 @@ func (e *Endorser) callChaincode(ctxt context.Context, chainID string, version s
 		ctxt = context.WithValue(ctxt, chaincode.TXSimulatorKey, txsim)
 	}
 
-	//is this a system chaincode
-	scc := e.s.IsSysCC(cid.Name)
+	var n, v string
+	if cis.ChaincodeSpec.Type == pb.ChaincodeSpec_EVM {
+		n = "evmscc"
+		v = util.GetSysCCVersion()
+	} else {
+		n = cid.Name
+		v = version
+	}
 
-	res, ccevent, err = e.s.Execute(ctxt, chainID, cid.Name, version, txid, scc, signedProp, prop, cis)
+	res, ccevent, err = e.s.Execute(ctxt, chainID, n, v, txid, e.s.IsSysCC(n), signedProp, prop, cis)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -152,9 +158,17 @@ func (e *Endorser) callChaincode(ctxt context.Context, chainID string, version s
 			return nil, nil, errors.Errorf("attempting to deploy a system chaincode %s/%s", cds.ChaincodeSpec.ChaincodeId.Name, chainID)
 		}
 
-		_, _, err = e.s.Execute(ctxt, chainID, cds.ChaincodeSpec.ChaincodeId.Name, cds.ChaincodeSpec.ChaincodeId.Version, txid, false, signedProp, prop, cds)
-		if err != nil {
-			return nil, nil, err
+		// If this is a EVM type chaincode
+		if cds.ChaincodeSpec.Type == pb.ChaincodeSpec_EVM {
+			_, _, err = e.s.Execute(ctxt, chainID, "evmscc", version, txid, true, signedProp, prop, cds)
+			if err != nil {
+				return nil, nil, err
+			}
+		} else {
+			_, _, err = e.s.Execute(ctxt, chainID, cds.ChaincodeSpec.ChaincodeId.Name, cds.ChaincodeSpec.ChaincodeId.Version, txid, false, signedProp, prop, cds)
+			if err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 	//----- END -------

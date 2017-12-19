@@ -37,6 +37,7 @@ import (
 	cutil "github.com/hyperledger/fabric/core/container/util"
 	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/spf13/viper"
+	"github.com/hyperledger/fabric/core/chaincode/platforms/evm"
 )
 
 // Interface for validating the specification and and writing the package for
@@ -73,6 +74,8 @@ func Find(chaincodeType pb.ChaincodeSpec_Type) (Platform, error) {
 		return &java.Platform{}, nil
 	case pb.ChaincodeSpec_NODE:
 		return &node.Platform{}, nil
+	case pb.ChaincodeSpec_EVM:
+		return &evm.Platform{}, nil
 	default:
 		return nil, fmt.Errorf("Unknown chaincodeType: %s", chaincodeType)
 	}

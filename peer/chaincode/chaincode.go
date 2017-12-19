@@ -60,6 +60,7 @@ var (
 	customIDGenAlg           string
 	channelID                string
 	chaincodeVersion         string
+	chaincodeBytecode        string
 	policy                   string
 	escc                     string
 	vscc                     string
@@ -98,6 +99,8 @@ func resetFlags() {
 		fmt.Sprint("Name of the chaincode"))
 	flags.StringVarP(&chaincodeVersion, "version", "v", common.UndefinedParamValue,
 		fmt.Sprint("Version of the chaincode specified in install/instantiate/upgrade commands"))
+	flags.StringVarP(&chaincodeBytecode, "bytecode", "b", common.UndefinedParamValue,
+		fmt.Sprint("EVM bytecode"))
 	flags.StringVarP(&chaincodeUsr, "username", "u", common.UndefinedParamValue,
 		fmt.Sprint("Username for chaincode operations when security is enabled"))
 	flags.StringVarP(&customIDGenAlg, "tid", "t", common.UndefinedParamValue,

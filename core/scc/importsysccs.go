@@ -26,6 +26,7 @@ import (
 	"github.com/hyperledger/fabric/core/scc/qscc"
 	"github.com/hyperledger/fabric/core/scc/rscc"
 	"github.com/hyperledger/fabric/core/scc/vscc"
+	"github.com/hyperledger/fabric/core/scc/evmscc"
 )
 
 //see systemchaincode_test.go for an example using "sample_syscc"
@@ -78,6 +79,15 @@ var systemChaincodes = []*SystemChaincode{
 		Chaincode:         rscc.NewRscc(),
 		InvokableExternal: true,  // rscc can be invoked to update policies
 		InvokableCC2CC:    false, // rscc cannot be invoked from a cc
+	},
+	{
+		Enabled:           true,
+		Name:              "evmscc",
+		Path:              "github.com/hyperledger/fabric/core/scc/evmscc",
+		InitArgs:          [][]byte{[]byte("")},
+		Chaincode:         &evmscc.EvmChaincode{},
+		InvokableExternal: true,
+		InvokableCC2CC:    true,
 	},
 }
 

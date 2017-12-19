@@ -665,6 +665,8 @@ func (chaincodeSupport *ChaincodeSupport) Launch(context context.Context, cccid 
 			err = errors.Errorf("premature execution - chaincode (%s) is being launched", canName)
 			return cID, cMsg, err
 		}
+
+		chaincodeLogger.Warningf("chaincode is not running (need to launch) : %s", canName)
 	}
 	chaincodeSupport.runningChaincodes.Unlock()
 

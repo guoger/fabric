@@ -49,6 +49,7 @@ func installCmd(cf *ChaincodeCmdFactory) *cobra.Command {
 		"ctor",
 		"path",
 		"name",
+		"bytecode",
 		"version",
 	}
 	attachFlags(chaincodeInstallCmd, flagList)

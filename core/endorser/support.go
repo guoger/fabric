@@ -21,6 +21,7 @@ import (
 	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
+	"github.com/golang/protobuf/proto"
 )
 
 // SupportImpl provides an implementation of the endorser.Support interface
@@ -89,6 +90,16 @@ func (s *SupportImpl) Execute(ctxt context.Context, cid, name, version, txid str
 		cis.ChaincodeSpec.Input = decoration.Apply(prop, cis.ChaincodeSpec.Input, decorators...)
 		cccid.ProposalDecorations = cis.ChaincodeSpec.Input.Decorations
 
+		var originalCCName string
+		var err error
+		if originalCCName, err = getOrigianlChaincodeName(prop); err != nil {
+			return nil, nil, errors.Errorf("failed to execute proposal because = %s", err)
+		}
+
+		if syscc && name == "evmscc" {
+			cis.ChaincodeSpec.Input.Args = append([][]byte{[]byte(originalCCName)}, cis.ChaincodeSpec.Input.Args...)
+		}
+
 		return chaincode.ExecuteChaincode(ctxt, cccid, cis.ChaincodeSpec.Input.Args)
 	default:
 		panic("programming error, unkwnown spec type")
@@ -132,4 +143,23 @@ func (s *SupportImpl) CheckInsantiationPolicy(name, version string, cd resources
 // and whether the Application config exists
 func (s *SupportImpl) GetApplicationConfig(cid string) (channelconfig.Application, bool) {
 	return peer.GetSupport().GetApplicationConfig(cid)
+}
+
+func getOrigianlChaincodeName(proposal *pb.Proposal) (string, error) {
+	hdr := &common.Header{}
+	if err := proto.Unmarshal(proposal.Header, hdr); err != nil {
+		return "", errors.Errorf("error unmarshaling original proposal header")
+	}
+
+	chhdr := &common.ChannelHeader{}
+	if err := proto.Unmarshal(hdr.ChannelHeader, chhdr); err != nil {
+		return "", errors.Errorf("error unmarshaling original proposal channel header")
+	}
+
+	ccHdrExt := &pb.ChaincodeHeaderExtension{}
+	if err := proto.Unmarshal(chhdr.Extension, ccHdrExt); err != nil {
+		return "", errors.Errorf("error unmarshaling origianl proposal channel header extension")
+	}
+
+	return ccHdrExt.ChaincodeId.Name, nil
 }
