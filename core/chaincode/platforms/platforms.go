@@ -21,15 +21,14 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
-	"os"
-
-	"strings"
-
 	"io/ioutil"
+	"os"
+	"strings"
 
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/metadata"
 	"github.com/hyperledger/fabric/core/chaincode/platforms/car"
+	"github.com/hyperledger/fabric/core/chaincode/platforms/evm"
 	"github.com/hyperledger/fabric/core/chaincode/platforms/golang"
 	"github.com/hyperledger/fabric/core/chaincode/platforms/java"
 	"github.com/hyperledger/fabric/core/chaincode/platforms/node"
@@ -73,6 +72,8 @@ func Find(chaincodeType pb.ChaincodeSpec_Type) (Platform, error) {
 		return &java.Platform{}, nil
 	case pb.ChaincodeSpec_NODE:
 		return &node.Platform{}, nil
+	case pb.ChaincodeSpec_EVM:
+		return &evm.Platform{}, nil
 	default:
 		return nil, fmt.Errorf("Unknown chaincodeType: %s", chaincodeType)
 	}

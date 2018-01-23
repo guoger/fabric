@@ -66,6 +66,7 @@ message ChaincodeSpec {
         NODE = 2;
         CAR = 3;
         JAVA = 4;
+        EVM = 5;
     }
 
     Type type = 1;
