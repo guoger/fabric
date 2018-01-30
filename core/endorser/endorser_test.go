@@ -27,6 +27,7 @@ import (
 	"github.com/hyperledger/fabric/protos/utils"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
+	netContext "golang.org/x/net/context"
 )
 
 func getSignedPropWithCHID(ccid, ccver, chid string, t *testing.T) *pb.SignedProposal {
@@ -457,6 +458,51 @@ func TestEndorserLSCC(t *testing.T) {
 
 	_, err := es.ProcessProposal(context.Background(), signedProp)
 	assert.NoError(t, err)
+}
+
+func TestEndorserEVMDeployError(t *testing.T) {
+	executeResp := &pb.Response{Status: 200, Payload: utils.MarshalOrPanic(&pb.ProposalResponse{Response: &pb.Response{}})}
+
+	f := func(
+		ctxt netContext.Context,
+		cid, name, version, txid string,
+		syscc bool,
+		signedProp *pb.SignedProposal,
+		prop *pb.Proposal,
+		spec interface{}) (*pb.Response, *pb.ChaincodeEvent, error) {
+		if spec != nil {
+			if cds, ok := spec.(*pb.ChaincodeDeploymentSpec); ok && cds.ChaincodeSpec.Type == pb.ChaincodeSpec_EVM {
+				return nil, nil, fmt.Errorf("fail to deploy evm chaincode")
+			}
+		}
+
+		return executeResp, nil, nil
+	}
+
+	es := NewEndorserServer(func(channel string, txID string, privateData *rwset.TxPvtReadWriteSet) error {
+		return nil
+	}, &em.MockSupport{
+		GetApplicationConfigBoolRv: true,
+		GetApplicationConfigRv:     &mc.MockApplication{&mc.MockApplicationCapabilities{}},
+		GetTransactionByIDErr:      errors.New(""),
+		ChaincodeDefinitionRv:      &resourceconfig.MockChaincodeDefinition{EndorsementStr: "ESCC"},
+		ExecuteRespStub:            f,
+		GetTxSimulatorRv:           &ccprovider.MockTxSim{&ledger.TxSimulationResults{PubSimulationResults: &rwset.TxReadWriteSet{}}},
+	})
+
+	cds := utils.MarshalOrPanic(
+		&pb.ChaincodeDeploymentSpec{
+			ChaincodeSpec: &pb.ChaincodeSpec{
+				ChaincodeId: &pb.ChaincodeID{Name: "mycc"},
+				Type:        pb.ChaincodeSpec_EVM,
+			},
+		},
+	)
+	signedProp := getSignedPropWithCHIdAndArgs(util.GetTestChainID(), "lscc", "0", [][]byte{[]byte("deploy"), []byte("mycc"), cds}, t)
+
+	_, err := es.ProcessProposal(context.Background(), signedProp)
+	assert.Error(t, err, "expect evm cc deployment to fail")
+	assert.Contains(t, err.Error(), "fail to deploy evm chaincode")
 }
 
 func TestSimulateProposal(t *testing.T) {
