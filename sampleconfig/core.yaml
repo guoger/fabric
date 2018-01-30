@@ -514,6 +514,7 @@ chaincode:
         escc: enable
         vscc: enable
         qscc: enable
+        evmscc: enable
 
     # System chaincode plugins: in addition to being imported and compiled
     # into fabric through core/chaincode/importsysccs.go, system chaincodes
