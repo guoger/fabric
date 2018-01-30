@@ -6,130 +6,17 @@
 version: '2'
 
 services:
-  zookeeper0:
-    container_name: zookeeper0
-    extends:
-      file: base/docker-compose-base.yaml
-      service: zookeeper
-    environment:
-      - ZOO_MY_ID=1
-      - ZOO_SERVERS=server.1=zookeeper0:2888:3888 server.2=zookeeper1:2888:3888 server.3=zookeeper2:2888:3888
-
-  zookeeper1:
-    container_name: zookeeper1
-    extends:
-      file: base/docker-compose-base.yaml
-      service: zookeeper
-    environment:
-      - ZOO_MY_ID=2
-      - ZOO_SERVERS=server.1=zookeeper0:2888:3888 server.2=zookeeper1:2888:3888 server.3=zookeeper2:2888:3888
-
-  zookeeper2:
-    container_name: zookeeper2
-    extends:
-      file: base/docker-compose-base.yaml
-      service: zookeeper
-    environment:
-      - ZOO_MY_ID=3
-      - ZOO_SERVERS=server.1=zookeeper0:2888:3888 server.2=zookeeper1:2888:3888 server.3=zookeeper2:2888:3888
-
-  kafka0:
-    container_name: kafka0
-    extends:
-      file: base/docker-compose-base.yaml
-      service: kafka
-    environment:
-      - KAFKA_BROKER_ID=0
-      - KAFKA_MIN_INSYNC_REPLICAS=2
-      - KAFKA_DEFAULT_REPLICATION_FACTOR=3
-      - KAFKA_ZOOKEEPER_CONNECT=zookeeper0:2181,zookeeper1:2181,zookeeper2:2181
-    depends_on:
-      - zookeeper0
-      - zookeeper1
-      - zookeeper2
-
-  kafka1:
-    container_name: kafka1
-    extends:
-      file: base/docker-compose-base.yaml
-      service: kafka
-    environment:
-      - KAFKA_BROKER_ID=1
-      - KAFKA_MIN_INSYNC_REPLICAS=2
-      - KAFKA_DEFAULT_REPLICATION_FACTOR=3
-      - KAFKA_ZOOKEEPER_CONNECT=zookeeper0:2181,zookeeper1:2181,zookeeper2:2181
-    depends_on:
-      - zookeeper0
-      - zookeeper1
-      - zookeeper2
-
-  kafka2:
-    container_name: kafka2
-    extends:
-      file: base/docker-compose-base.yaml
-      service: kafka
-    environment:
-      - KAFKA_BROKER_ID=2
-      - KAFKA_MIN_INSYNC_REPLICAS=2
-      - KAFKA_DEFAULT_REPLICATION_FACTOR=3
-      - KAFKA_ZOOKEEPER_CONNECT=zookeeper0:2181,zookeeper1:2181,zookeeper2:2181
-    depends_on:
-      - zookeeper0
-      - zookeeper1
-      - zookeeper2
-
-  kafka3:
-    container_name: kafka3
-    extends:
-      file: base/docker-compose-base.yaml
-      service: kafka
-    environment:
-      - KAFKA_BROKER_ID=3
-      - KAFKA_MIN_INSYNC_REPLICAS=2
-      - KAFKA_DEFAULT_REPLICATION_FACTOR=3
-      - KAFKA_ZOOKEEPER_CONNECT=zookeeper0:2181,zookeeper1:2181,zookeeper2:2181
-    depends_on:
-      - zookeeper0
-      - zookeeper1
-      - zookeeper2
-
   orderer.example.com:
     extends:
       file:   base/docker-compose-base.yaml
       service: orderer.example.com
     container_name: orderer.example.com
-    depends_on:
-      - zookeeper0
-      - zookeeper1
-      - zookeeper2
-      - kafka0
-      - kafka1
-      - kafka2
-      - kafka3
 
   peer0.org1.example.com:
     container_name: peer0.org1.example.com
     extends:
       file:  base/docker-compose-base.yaml
       service: peer0.org1.example.com
-
-  peer1.org1.example.com:
-    container_name: peer1.org1.example.com
-    extends:
-      file:  base/docker-compose-base.yaml
-      service: peer1.org1.example.com
-
-  peer0.org2.example.com:
-    container_name: peer0.org2.example.com
-    extends:
-      file:  base/docker-compose-base.yaml
-      service: peer0.org2.example.com
-
-  peer1.org2.example.com:
-    container_name: peer1.org2.example.com
-    extends:
-      file:  base/docker-compose-base.yaml
-      service: peer1.org2.example.com
 
   cli:
     container_name: cli
@@ -142,7 +29,7 @@ services:
       - CORE_PEER_ID=cli
       - CORE_PEER_ADDRESS=peer0.org1.example.com:7051
       - CORE_PEER_LOCALMSPID=Org1MSP
-      - CORE_PEER_TLS_ENABLED=true
+      - CORE_PEER_TLS_ENABLED=false
       - CORE_PEER_TLS_CERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/server.crt
       - CORE_PEER_TLS_KEY_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/server.key
       - CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
@@ -155,9 +42,7 @@ services:
         - ./crypto-config:/opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/
         - ./scripts:/opt/gopath/src/github.com/hyperledger/fabric/peer/scripts/
         - ./channel-artifacts:/opt/gopath/src/github.com/hyperledger/fabric/peer/channel-artifacts
+        - ./demo.bin:/opt/demo.bin
     depends_on:
       - orderer.example.com
       - peer0.org1.example.com
-      - peer1.org1.example.com
-      - peer0.org2.example.com
-      - peer1.org2.example.com
