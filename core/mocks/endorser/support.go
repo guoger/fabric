@@ -25,6 +25,7 @@ type MockSupport struct {
 	ExecuteResp                      *pb.Response
 	ExecuteEvent                     *pb.ChaincodeEvent
 	ExecuteError                     error
+	ExecuteRespStub                  func(ctxt context.Context, cid, name, version, txid string, syscc bool, signedProp *pb.SignedProposal, prop *pb.Proposal, spec interface{}) (*pb.Response, *pb.ChaincodeEvent, error)
 	ChaincodeDefinitionRv            resourcesconfig.ChaincodeDefinition
 	ChaincodeDefinitionError         error
 	GetTxSimulatorRv                 *mc.MockTxSim
@@ -64,6 +65,10 @@ func (s *MockSupport) IsSysCC(name string) bool {
 }
 
 func (s *MockSupport) Execute(ctxt context.Context, cid, name, version, txid string, syscc bool, signedProp *pb.SignedProposal, prop *pb.Proposal, spec interface{}) (*pb.Response, *pb.ChaincodeEvent, error) {
+	if s.ExecuteRespStub != nil {
+		return s.ExecuteRespStub(ctxt, cid, name, version, txid, syscc, signedProp, prop, spec)
+	}
+
 	if spec != nil {
 		if _, istype := spec.(*pb.ChaincodeDeploymentSpec); istype {
 			return s.ExecuteCDSResp, s.ExecuteCDSEvent, s.ExecuteCDSError

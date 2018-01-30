@@ -152,9 +152,17 @@ func (e *Endorser) callChaincode(ctxt context.Context, chainID string, version s
 			return nil, nil, errors.Errorf("attempting to deploy a system chaincode %s/%s", cds.ChaincodeSpec.ChaincodeId.Name, chainID)
 		}
 
-		_, _, err = e.s.Execute(ctxt, chainID, cds.ChaincodeSpec.ChaincodeId.Name, cds.ChaincodeSpec.ChaincodeId.Version, txid, false, signedProp, prop, cds)
-		if err != nil {
-			return nil, nil, err
+		// If this is a EVM type chaincode, dispatch the init to evmscc
+		if cds.ChaincodeSpec.Type == pb.ChaincodeSpec_EVM {
+			_, _, err = e.s.Execute(ctxt, chainID, "evmscc", version, txid, true, signedProp, prop, cds)
+			if err != nil {
+				return nil, nil, err
+			}
+		} else {
+			_, _, err = e.s.Execute(ctxt, chainID, cds.ChaincodeSpec.ChaincodeId.Name, cds.ChaincodeSpec.ChaincodeId.Version, txid, false, signedProp, prop, cds)
+			if err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 	//----- END -------
