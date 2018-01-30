@@ -37,6 +37,7 @@ func invokeCmd(cf *ChaincodeCmdFactory) *cobra.Command {
 		},
 	}
 	flagList := []string{
+		"lang",
 		"name",
 		"ctor",
 		"channelID",

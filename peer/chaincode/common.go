@@ -77,17 +77,17 @@ func getChaincodeSpec(cmd *cobra.Command) (*pb.ChaincodeSpec, error) {
 		return spec, fmt.Errorf("Chaincode argument error: %s", err)
 	}
 
-	chaincodeLang = strings.ToUpper(chaincodeLang)
+	ccType := strings.ToUpper(chaincodeLang)
 	if javaEnabled() {
 		logger.Debug("java chaincode enabled")
 	} else {
 		logger.Debug("java chaincode disabled")
-		if pb.ChaincodeSpec_Type_value[chaincodeLang] == int32(pb.ChaincodeSpec_JAVA) {
+		if pb.ChaincodeSpec_Type_value[ccType] == int32(pb.ChaincodeSpec_JAVA) {
 			return nil, fmt.Errorf("Java chaincode is work-in-progress and disabled")
 		}
 	}
 	spec = &pb.ChaincodeSpec{
-		Type:        pb.ChaincodeSpec_Type(pb.ChaincodeSpec_Type_value[chaincodeLang]),
+		Type:        pb.ChaincodeSpec_Type(pb.ChaincodeSpec_Type_value[ccType]),
 		ChaincodeId: &pb.ChaincodeID{Path: chaincodePath, Name: chaincodeName, Version: chaincodeVersion},
 		Input:       input,
 	}
@@ -98,6 +98,13 @@ func chaincodeInvokeOrQuery(cmd *cobra.Command, args []string, invoke bool, cf *
 	spec, err := getChaincodeSpec(cmd)
 	if err != nil {
 		return err
+	}
+
+	// If this is an invocation to evm chaincode, encapsulate actual
+	// chaincode name into args and re-target invocation to evmscc.
+	if chaincodeLang == "evm" {
+		spec.Input.Args = append([][]byte{[]byte(spec.ChaincodeId.Name)}, spec.Input.Args...)
+		spec.ChaincodeId.Name = "evmscc"
 	}
 
 	proposalResp, err := ChaincodeInvokeOrQuery(

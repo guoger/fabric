@@ -37,6 +37,7 @@ func queryCmd(cf *ChaincodeCmdFactory) *cobra.Command {
 		},
 	}
 	flagList := []string{
+		"lang",
 		"ctor",
 		"name",
 		"tid",
