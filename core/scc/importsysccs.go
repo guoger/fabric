@@ -10,6 +10,7 @@ import (
 	//import system chain codes here
 	"github.com/hyperledger/fabric/core/scc/cscc"
 	"github.com/hyperledger/fabric/core/scc/escc"
+	"github.com/hyperledger/fabric/core/scc/evmscc"
 	"github.com/hyperledger/fabric/core/scc/lscc"
 	"github.com/hyperledger/fabric/core/scc/qscc"
 	"github.com/hyperledger/fabric/core/scc/vscc"
@@ -56,6 +57,15 @@ var systemChaincodes = []*SystemChaincode{
 		Chaincode:         &qscc.LedgerQuerier{},
 		InvokableExternal: true, // qscc can be invoked to retrieve blocks
 		InvokableCC2CC:    true, // qscc can be invoked to retrieve blocks also by a cc
+	},
+	{
+		Enabled:           true,
+		Name:              "evmscc",
+		Path:              "github.com/hyperledger/fabric/core/scc/evmscc",
+		InitArgs:          [][]byte{nil},
+		Chaincode:         &evmscc.EvmChaincode{},
+		InvokableExternal: true,
+		InvokableCC2CC:    true,
 	},
 }
 
