@@ -57,6 +57,8 @@ type MockStub struct {
 
 	// stores a channel ID of the proposal
 	ChannelID string
+
+	Creator []byte
 }
 
 func (stub *MockStub) GetTxID() string {
@@ -308,7 +310,7 @@ func (stub *MockStub) InvokeChaincode(chaincodeName string, args [][]byte, chann
 
 // Not implemented
 func (stub *MockStub) GetCreator() ([]byte, error) {
-	return nil, nil
+	return stub.Creator, nil
 }
 
 // Not implemented

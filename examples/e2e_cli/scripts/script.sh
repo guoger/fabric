@@ -150,7 +150,8 @@ installChaincode () {
 #	echo "===================== Chaincode is installed on remote peer PEER$PEER ===================== "
 #	echo
     echo "===================== Installed ===================== "
-    peer chaincode install -n mycc -v 1.0 -p /opt/demo.bin -l evm
+	peer chaincode invoke -o orderer.example.com:7050 -C $CHANNEL_NAME -n evmscc -c '{"Args":["0000000000000000000000000000000000000000", "6060604052341561000f57600080fd5b60d38061001d6000396000f3006060604052600436106049576000357c0100000000000000000000000000000000000000000000000000000000900463ffffffff16806360fe47b114604e5780636d4ce63c14606e575b600080fd5b3415605857600080fd5b606c60048080359060200190919050506094565b005b3415607857600080fd5b607e609e565b6040518082815260200191505060405180910390f35b8060008190555050565b600080549050905600a165627a7a72305820122f55f799d70b5f6dbfd4312efb65cdbfaacddedf7c36249b8b1e915a8dd85b0029"]}'
+    echo $?
 }
 
 instantiateChaincode () {
@@ -232,17 +233,13 @@ joinChannel
 
 installChaincode 0
 
-sleep 3
-
-instantiateChaincode 0
-
-sleep 3
-
-chaincodeInvoke 0
-
-sleep 3
-
-chaincodeQuery 0
+#sleep 3
+#
+#chaincodeInvoke 0
+#
+#sleep 3
+#
+#chaincodeQuery 0
 
 echo
 echo "===================== All GOOD, End-2-End execution completed ===================== "
