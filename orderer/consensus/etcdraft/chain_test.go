@@ -21,6 +21,7 @@ import (
 	consensusmocks "github.com/hyperledger/fabric/orderer/consensus/mocks"
 	mockblockcutter "github.com/hyperledger/fabric/orderer/mocks/common/blockcutter"
 	"github.com/hyperledger/fabric/protos/common"
+	"github.com/hyperledger/fabric/protos/orderer"
 	raftprotos "github.com/hyperledger/fabric/protos/orderer/etcdraft"
 	"github.com/hyperledger/fabric/protos/utils"
 	. "github.com/onsi/ginkgo"
@@ -326,17 +327,208 @@ var _ = Describe("Chain", func() {
 				Expect(chain.Errored()).Should(BeClosed())
 			})
 
-			It("config message is not yet supported", func() {
-				c := &common.Envelope{
-					Payload: utils.MarshalOrPanic(&common.Payload{
-						Header: &common.Header{ChannelHeader: utils.MarshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_CONFIG), ChannelId: channelID})},
-						Data:   []byte("TEST_MESSAGE"),
-					}),
+			Describe("Config updates", func() {
+				var (
+					configEnv   *common.Envelope
+					configSeq   uint64
+					configBlock *common.Block
+				)
+
+				// sets the configEnv var declared above
+				createConfigEnvFromConfigUpdateEnv := func(chainID string, headerType common.HeaderType, configUpdateEnv *common.ConfigUpdateEnvelope) *common.Envelope {
+					// TODO: use the config utility functions imported at end of file for doing the same
+					return &common.Envelope{
+						Payload: utils.MarshalOrPanic(&common.Payload{
+							Header: &common.Header{
+								ChannelHeader: utils.MarshalOrPanic(&common.ChannelHeader{
+									Type:      int32(headerType),
+									ChannelId: chainID,
+								}),
+							},
+							Data: utils.MarshalOrPanic(&common.ConfigEnvelope{
+								LastUpdate: &common.Envelope{
+									Payload: utils.MarshalOrPanic(&common.Payload{
+										Header: &common.Header{
+											ChannelHeader: utils.MarshalOrPanic(&common.ChannelHeader{
+												Type:      int32(common.HeaderType_CONFIG_UPDATE),
+												ChannelId: chainID,
+											}),
+										},
+										Data: utils.MarshalOrPanic(configUpdateEnv),
+									}), // common.Payload
+								}, // LastUpdate
+							}),
+						}),
+					}
 				}
 
-				Expect(func() {
-					chain.Configure(c, uint64(0))
-				}).To(Panic())
+				createConfigUpdateEnvFromOrdererValues := func(chainID string, values map[string]*common.ConfigValue) *common.ConfigUpdateEnvelope {
+					return &common.ConfigUpdateEnvelope{
+						ConfigUpdate: utils.MarshalOrPanic(&common.ConfigUpdate{
+							ChannelId: chainID,
+							ReadSet:   &common.ConfigGroup{},
+							WriteSet: &common.ConfigGroup{
+								Groups: map[string]*common.ConfigGroup{
+									"Orderer": {
+										Values: values,
+									},
+								},
+							}, // WriteSet
+						}),
+					}
+				}
+
+				// ensures that configBlock has the correct configEnv
+				JustBeforeEach(func() {
+					configBlock = &common.Block{
+						Data: &common.BlockData{
+							Data: [][]byte{utils.MarshalOrPanic(configEnv)},
+						},
+					}
+					support.CreateNextBlockReturns(configBlock)
+				})
+
+				Context("when a config udpate with invalid header comes", func() {
+
+					BeforeEach(func() {
+						configEnv = createConfigEnvFromConfigUpdateEnv(channelID,
+							common.HeaderType_CONFIG_UPDATE, // invalid header; envelopes with CONFIG_UPDATE header never reach chain
+							&common.ConfigUpdateEnvelope{ConfigUpdate: []byte("test invalid envelope")})
+						configSeq = 0
+					})
+
+					It("should throw an error", func() {
+						err := chain.Configure(configEnv, configSeq)
+						Expect(err).To(MatchError("config transaction has unknown header type"))
+					})
+				})
+
+				Context("when a type A config update comes", func() {
+
+					Context("for existing channel", func() {
+
+						// use to prepare the Orderer Values
+						BeforeEach(func() {
+							values := map[string]*common.ConfigValue{
+								"BatchTimeout": {
+									Version: 1,
+									Value: utils.MarshalOrPanic(&orderer.BatchTimeout{
+										Timeout: "3ms",
+									}),
+								},
+							}
+							configEnv = createConfigEnvFromConfigUpdateEnv(channelID,
+								common.HeaderType_CONFIG,
+								createConfigUpdateEnvFromOrdererValues(channelID, values),
+							)
+							configSeq = 0
+						}) // BeforeEach block
+
+						Context("without revalidation (i.e. correct config sequence)", func() {
+
+							Context("without pending normal envelope", func() {
+								It("should create a config block and no normal block", func() {
+									err := chain.Configure(configEnv, configSeq)
+									Expect(err).NotTo(HaveOccurred())
+									Eventually(support.WriteConfigBlockCallCount).Should(Equal(1))
+									Eventually(support.WriteBlockCallCount).Should(Equal(0))
+								})
+							})
+
+							Context("with pending normal envelope", func() {
+								It("should create a config block and a normal block", func() {
+									close(cutter.Block)
+									support.CreateNextBlockReturnsOnCall(0, normalBlock)
+									support.CreateNextBlockReturnsOnCall(1, configBlock)
+
+									By("adding a normal envelope")
+									err := chain.Order(m, uint64(0))
+									Expect(err).NotTo(HaveOccurred())
+									Eventually(func() int {
+										return len(cutter.CurBatch)
+									}).Should(Equal(1))
+
+									// // clock.WaitForNWatchersAndIncrement(timeout, 2)
+
+									By("adding a config envelope")
+									err = chain.Configure(configEnv, configSeq)
+									By("came out of Configure")
+									Expect(err).NotTo(HaveOccurred())
+
+									Eventually(support.CreateNextBlockCallCount).Should(Equal(2))
+									Eventually(support.WriteBlockCallCount).Should(Equal(1))
+									Eventually(support.WriteConfigBlockCallCount).Should(Equal(1))
+								})
+							})
+						})
+
+						Context("with revalidation (i.e. incorrect config sequence)", func() {
+
+							BeforeEach(func() {
+								support.SequenceReturns(1) // this causes the revalidation
+							})
+
+							It("should create config block upon correct revalidation", func() {
+								support.ProcessConfigMsgReturns(configEnv, 1, nil) // nil implies correct revalidation
+
+								err := chain.Configure(configEnv, configSeq)
+								Expect(err).NotTo(HaveOccurred())
+								Eventually(support.WriteConfigBlockCallCount).Should(Equal(1))
+							})
+
+							It("should not create config block upon incorrect revalidation", func() {
+								support.ProcessConfigMsgReturns(configEnv, 1, errors.Errorf("Invalid config envelope at changed config sequence"))
+
+								err := chain.Configure(configEnv, configSeq)
+								Expect(err).NotTo(HaveOccurred())
+								Consistently(support.WriteConfigBlockCallCount).Should(Equal(0)) // no call to WriteConfigBlock
+							})
+						})
+					})
+
+					Context("for creating a new channel", func() {
+
+						// use to prepare the Orderer Values
+						BeforeEach(func() {
+							chainID := "mychannel"
+							configEnv = createConfigEnvFromConfigUpdateEnv(chainID,
+								common.HeaderType_ORDERER_TRANSACTION,
+								&common.ConfigUpdateEnvelope{ConfigUpdate: []byte("test channel creation envelope")})
+							configSeq = 0
+						}) // BeforeEach block
+
+						It("should throw an error", func() {
+							err := chain.Configure(configEnv, configSeq)
+							Expect(err).To(MatchError("channel creation requests not supported yet"))
+						})
+					})
+				}) // Context block for type A config
+
+				Context("when a type B config update comes", func() {
+
+					Context("for existing channel", func() {
+						// use to prepare the Orderer Values
+						BeforeEach(func() {
+							values := map[string]*common.ConfigValue{
+								"ConsensusType": {
+									Version: 1,
+									Value: utils.MarshalOrPanic(&orderer.ConsensusType{
+										Metadata: []byte("new consenter"),
+									}),
+								},
+							}
+							configEnv = createConfigEnvFromConfigUpdateEnv(channelID,
+								common.HeaderType_CONFIG,
+								createConfigUpdateEnvFromOrdererValues(channelID, values))
+							configSeq = 0
+						}) // BeforeEach block
+
+						It("should throw an error", func() {
+							err := chain.Configure(configEnv, configSeq)
+							Expect(err).To(MatchError("updates to ConsensusType not supported currently"))
+						})
+					})
+				})
 			})
 		})
 	})
