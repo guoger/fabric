@@ -21,7 +21,9 @@ import (
 	genesisconfig "github.com/hyperledger/fabric/common/tools/configtxgen/localconfig"
 	"github.com/hyperledger/fabric/core/comm"
 	"github.com/hyperledger/fabric/core/config/configtest"
+	"github.com/hyperledger/fabric/orderer/common/cluster"
 	"github.com/hyperledger/fabric/orderer/common/localconfig"
+	"github.com/hyperledger/fabric/orderer/common/multichannel"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -192,11 +194,13 @@ func TestInitializeBootstrapChannel(t *testing.T) {
 
 			if tc.panics {
 				assert.Panics(t, func() {
-					initializeBootstrapChannel(bootstrapConfig, ledgerFactory)
+					genesisBlock := extractGenesisBlock(bootstrapConfig)
+					initializeBootstrapChannel(genesisBlock, ledgerFactory)
 				})
 			} else {
 				assert.NotPanics(t, func() {
-					initializeBootstrapChannel(bootstrapConfig, ledgerFactory)
+					genesisBlock := extractGenesisBlock(bootstrapConfig)
+					initializeBootstrapChannel(genesisBlock, ledgerFactory)
 				})
 			}
 		})
@@ -247,7 +251,7 @@ func TestInitializeMultiChainManager(t *testing.T) {
 	conf := genesisConfig(t)
 	assert.NotPanics(t, func() {
 		initializeLocalMsp(conf)
-		initializeMultichannelRegistrar(conf, localmsp.NewSigner())
+		initializeMultichannelRegistrar(false, &cluster.PredicateDialer{}, comm.ServerConfig{}, nil, conf, localmsp.NewSigner())
 	})
 }
 
@@ -305,10 +309,10 @@ func TestUpdateTrustedRoots(t *testing.T) {
 	callback := func(bundle *channelconfig.Bundle) {
 		if grpcServer.MutualTLSRequired() {
 			t.Log("callback called")
-			updateTrustedRoots(grpcServer, caSupport, bundle)
+			updateTrustedRoots(grpcServer, caSupport, bundle, &cluster.PredicateDialer{}, nil)
 		}
 	}
-	initializeMultichannelRegistrar(genesisConfig(t), localmsp.NewSigner(), callback)
+	initializeMultichannelRegistrar(false, &cluster.PredicateDialer{}, comm.ServerConfig{}, nil, genesisConfig(t), localmsp.NewSigner(), callback)
 	t.Logf("# app CAs: %d", len(caSupport.AppRootCAsByChain[genesisconfig.TestChainID]))
 	t.Logf("# orderer CAs: %d", len(caSupport.OrdererRootCAsByChain[genesisconfig.TestChainID]))
 	// mutual TLS not required so no updates should have occurred
@@ -333,20 +337,46 @@ func TestUpdateTrustedRoots(t *testing.T) {
 		AppRootCAsByChain:     make(map[string][][]byte),
 		OrdererRootCAsByChain: make(map[string][][]byte),
 	}
+
+	predDialer := &cluster.PredicateDialer{}
+	predDialer.SetConfig(initializeClusterConfig(conf))
+
 	callback = func(bundle *channelconfig.Bundle) {
 		if grpcServer.MutualTLSRequired() {
 			t.Log("callback called")
-			updateTrustedRoots(grpcServer, caSupport, bundle)
+			updateTrustedRoots(grpcServer, caSupport, bundle, predDialer, nil)
 		}
 	}
-	initializeMultichannelRegistrar(genesisConfig(t), localmsp.NewSigner(), callback)
+	initializeMultichannelRegistrar(false, &cluster.PredicateDialer{}, comm.ServerConfig{}, nil, genesisConfig(t), localmsp.NewSigner(), callback)
 	t.Logf("# app CAs: %d", len(caSupport.AppRootCAsByChain[genesisconfig.TestChainID]))
 	t.Logf("# orderer CAs: %d", len(caSupport.OrdererRootCAsByChain[genesisconfig.TestChainID]))
 	// mutual TLS is required so updates should have occurred
 	// we expect an intermediate and root CA for apps and orderers
 	assert.Equal(t, 2, len(caSupport.AppRootCAsByChain[genesisconfig.TestChainID]))
 	assert.Equal(t, 2, len(caSupport.OrdererRootCAsByChain[genesisconfig.TestChainID]))
+	assert.Len(t, predDialer.Config.Load().(comm.ClientConfig).SecOpts.ServerRootCAs, 2)
 	grpcServer.Listener().Close()
+}
+
+func TestNewEtcdRaftConsenter(t *testing.T) {
+	srv, err := comm.NewGRPCServer("127.0.0.1:0", comm.ServerConfig{})
+	assert.NoError(t, err)
+	defer srv.Stop()
+	dialer := &cluster.PredicateDialer{}
+	consenter := newEtcdRaftConsenter(dialer, &localconfig.TopLevel{}, comm.ServerConfig{
+		SecOpts: &comm.SecureOptions{
+			Certificate: []byte{1, 2, 3},
+		},
+	}, srv, &multichannel.Registrar{})
+
+	// Assert that the certificate from the gRPC server was passed to the consenter
+	assert.Equal(t, []byte{1, 2, 3}, consenter.Cert)
+	// Assert that all dependencies for the consenter were populated
+	assert.NotNil(t, consenter.Communication)
+	assert.NotNil(t, consenter.Chains)
+	assert.NotNil(t, consenter.ChainSelector)
+	assert.NotNil(t, consenter.Dispatcher)
+	assert.NotNil(t, consenter.Logger)
 }
 
 func genesisConfig(t *testing.T) *localconfig.TopLevel {
