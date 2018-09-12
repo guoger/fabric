@@ -122,5 +122,6 @@ func (c *Consenter) HandleChain(support consensus.ConsenterSupport, metadata *co
 		Peers: peers,
 	}
 
-	return NewChain(support, opts, nil, c.Communication)
+	rpc := &cluster.RPC{Channel: support.ChainID(), Comm: c.Communication}
+	return NewChain(support, opts, c.Communication, rpc, nil)
 }
