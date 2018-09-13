@@ -28,6 +28,7 @@ import (
 	"github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
+	"github.com/pkg/errors"
 	"github.com/tedsuo/ifrit"
 	"github.com/tedsuo/ifrit/ginkgomon"
 	"github.com/tedsuo/ifrit/grouper"
@@ -94,6 +95,14 @@ type Peer struct {
 	Name         string         `yaml:"name,omitempty"`
 	Organization string         `yaml:"organization,omitempty"`
 	Channels     []*PeerChannel `yaml:"channels,omitempty"`
+}
+
+// ClusterMember defines a member of an ordering service cluster.
+type ClusterMember struct {
+	Host          string `yaml:"host,omitempty"`
+	Port          uint16 `yaml:"port,omitempty"`
+	ClientTLSCert string `yaml:"client_tls_cert,omitempty"`
+	ServerTLSCert string `yaml:"server_tls_cert,omitempty"`
 }
 
 // PeerChannel names of the channel a peer should be joined to and whether or
@@ -654,14 +663,11 @@ func (n *Network) CreateAndJoinChannel(o *Orderer, channelName string) {
 	tempFile.Close()
 	defer os.Remove(tempFile.Name())
 
-	sess, err := n.PeerAdminSession(creator, commands.ChannelCreate{
-		ChannelID:   channelName,
-		Orderer:     n.OrdererAddress(o, ListenPort),
-		File:        n.CreateChannelTxPath(channelName),
-		OutputBlock: tempFile.Name(),
-	})
-	Expect(err).NotTo(HaveOccurred())
-	Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
+	// Try to create a channel until you succeed.
+	// We need to retry because the orderer's consensus might
+	// be in initialization or in reconfiguration.
+	tryToCreateChannel := n.createChannelAttempt(creator, o, channelName, tempFile)
+	Eventually(tryToCreateChannel, n.EventuallyTimeout).Should(BeTrue())
 
 	for _, p := range peers {
 		sess, err := n.PeerAdminSession(p, commands.ChannelJoin{
@@ -669,6 +675,25 @@ func (n *Network) CreateAndJoinChannel(o *Orderer, channelName string) {
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
+	}
+}
+
+// createChannelAttempt returns a function which creates a channel, and
+// is to be evaluated by an assertion function.
+func (n *Network) createChannelAttempt(creator *Peer, o *Orderer, channelName string, tempFile *os.File) func() (bool, error) {
+	return func() (bool, error) {
+		sess, err := n.PeerAdminSession(creator, commands.ChannelCreate{
+			ChannelID:   channelName,
+			Orderer:     n.OrdererAddress(o, ListenPort),
+			File:        n.CreateChannelTxPath(channelName),
+			OutputBlock: tempFile.Name(),
+		})
+		Expect(err).NotTo(HaveOccurred())
+		output := sess.Wait(n.EventuallyTimeout)
+		if sess.ExitCode() == 0 {
+			return true, nil
+		}
+		return false, errors.New(string(output.Out.Contents()))
 	}
 }
 
@@ -1101,6 +1126,27 @@ func (n *Network) OrgsForOrderers(ordererNames []string) []*Organization {
 		orgs = append(orgs, org)
 	}
 	return orgs
+}
+
+// ClusterMembers returns all cluster members in the network
+func (n *Network) ClusterMembers() []*ClusterMember {
+	var members []*ClusterMember
+	for _, org := range n.OrdererOrgs() {
+		for _, orderer := range n.OrderersInOrg(org.Name) {
+			port := n.PortsByOrdererID[orderer.ID()][ListenPort]
+			orderer := fmt.Sprintf("%s.%s", orderer.Name, org.Domain)
+			certDir := filepath.Join("crypto", "ordererOrganizations", org.Domain, "orderers", orderer, "tls")
+			serverCert := filepath.Join(certDir, "server.crt")
+			clientCert := filepath.Join(certDir, "server.crt")
+			members = append(members, &ClusterMember{
+				ClientTLSCert: clientCert,
+				ServerTLSCert: serverCert,
+				Port:          port,
+				Host:          "127.0.0.1",
+			})
+		}
+	}
+	return members
 }
 
 // OrdererOrgs returns all Organization instances that own at least one

@@ -87,6 +87,15 @@ Profiles:{{ range .Profiles }}
         - {{ . }}
         {{- end }}
       {{- end }}
+      {{- if eq $w.Consensus.Type "etcdraft" }}
+      EtcdRaft:
+        Consenters:{{ range $w.ClusterMembers }}
+        - Host: 127.0.0.1
+          Port: {{ .Port }}
+          ClientTLSCert: {{ .ClientTLSCert }}
+          ServerTLSCert: {{ .ServerTLSCert }}
+        {{- end }}
+      {{- end }}
       Organizations:{{ range $w.OrgsForOrderers .Orderers }}
       - *{{ .MSPID }}
       {{- end }}
