@@ -388,7 +388,7 @@ var _ = Describe("Chain", func() {
 					support.CreateNextBlockReturns(configBlock)
 				})
 
-				Context("when a config udpate with invalid header comes", func() {
+				Context("when a config update with invalid header comes", func() {
 
 					BeforeEach(func() {
 						configEnv = createConfigEnvFromConfigUpdateEnv(channelID,
@@ -497,9 +497,9 @@ var _ = Describe("Chain", func() {
 							configSeq = 0
 						}) // BeforeEach block
 
-						It("should throw an error", func() {
+						It("should be able to create a channel", func() {
 							err := chain.Configure(configEnv, configSeq)
-							Expect(err).To(MatchError("channel creation requests not supported yet"))
+							Expect(err).NotTo(HaveOccurred())
 						})
 					})
 				}) // Context block for type A config
