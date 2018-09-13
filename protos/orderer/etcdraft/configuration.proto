@@ -30,7 +30,7 @@ message Consenter {
 // per-channel basis.
 message Options {
 	// specified in miliseconds
-	uint32 tick_interval = 1;
+	uint64 tick_interval = 1;
 
 	uint32 election_tick = 2;
 	uint32 heartbeat_tick = 3;
