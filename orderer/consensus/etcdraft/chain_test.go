@@ -8,10 +8,15 @@ package etcdraft_test
 
 import (
 	"encoding/pem"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"path"
 	"time"
 
 	"code.cloudfoundry.org/clock/fakeclock"
 	"github.com/coreos/etcd/raft"
+	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/common/crypto/tlsgen"
 	"github.com/hyperledger/fabric/common/flogging"
 	mockconfig "github.com/hyperledger/fabric/common/mocks/config"
@@ -35,11 +40,14 @@ const interval = time.Second
 
 var _ = Describe("Chain", func() {
 	var (
+		err error
+
 		m           *common.Envelope
 		normalBlock *common.Block
 		channelID   string
 		tlsCA       tlsgen.CA
 		logger      *flogging.FabricLogger
+		walDir      string
 	)
 
 	BeforeEach(func() {
@@ -53,6 +61,12 @@ var _ = Describe("Chain", func() {
 			}),
 		}
 		normalBlock = &common.Block{Data: &common.BlockData{Data: [][]byte{[]byte("foo")}}}
+		walDir, err = ioutil.TempDir("", "wal-")
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	AfterEach(func() {
+		os.RemoveAll(walDir)
 	})
 
 	Describe("Single raft node", func() {
@@ -98,6 +112,7 @@ var _ = Describe("Chain", func() {
 				Peers:           []raft.Peer{{ID: uint64(1)}},
 				Logger:          logger,
 				Storage:         storage,
+				WALDir:          walDir,
 			}
 			support = &consensusmocks.FakeConsenterSupport{}
 			support.ChainIDReturns(channelID)
@@ -531,24 +546,156 @@ var _ = Describe("Chain", func() {
 				})
 			})
 		})
+
+		Describe("Crash Fault Tolerant", func() {
+			Describe("when a chain is started with existing WAL", func() {
+				var (
+					m1 *raftprotos.BlockMetadata
+					m2 *raftprotos.BlockMetadata
+				)
+
+				JustBeforeEach(func() {
+					campaign()
+
+					close(cutter.Block)
+					cutter.CutNext = true
+					support.CreateNextBlockReturns(normalBlock)
+
+					// enque some data to be persisted on disk by raft
+					err := chain.Order(m, uint64(0))
+					Expect(err).NotTo(HaveOccurred())
+					Eventually(support.WriteBlockCallCount).Should(Equal(1))
+
+					_, metadata := support.WriteBlockArgsForCall(0)
+					m1 = &raftprotos.BlockMetadata{}
+					proto.Unmarshal(metadata, m1)
+
+					err = chain.Order(m, uint64(0))
+					Expect(err).NotTo(HaveOccurred())
+					Eventually(support.WriteBlockCallCount).Should(Equal(2))
+
+					_, metadata = support.WriteBlockArgsForCall(1)
+					m2 = &raftprotos.BlockMetadata{}
+					proto.Unmarshal(metadata, m2)
+
+					chain.Halt()
+				})
+
+				It("replays blocks from committed entries", func() {
+					newChain, err := etcdraft.NewChain(support, opt, configurator, nil, observe)
+					Expect(err).NotTo(HaveOccurred())
+					newChain.Start()
+					defer newChain.Halt()
+
+					Eventually(support.WriteBlockCallCount).Should(Equal(4))
+
+					_, metadata := support.WriteBlockArgsForCall(2)
+					m3 := &raftprotos.BlockMetadata{}
+					proto.Unmarshal(metadata, m3)
+
+					Expect(m3.Index).To(Equal(m1.Index))
+
+					_, metadata = support.WriteBlockArgsForCall(3)
+					m4 := &raftprotos.BlockMetadata{}
+					proto.Unmarshal(metadata, m4)
+
+					// expect both blocks to be replayed
+					Expect(m4.Index).To(Equal(m2.Index))
+				})
+
+				It("only replays blocks after Applied index", func() {
+					opt.Applied = m1.Index // first block was persisted
+					newChain, err := etcdraft.NewChain(support, opt, configurator, nil, observe)
+					Expect(err).NotTo(HaveOccurred())
+					newChain.Start()
+					defer newChain.Halt()
+
+					Eventually(support.WriteBlockCallCount).Should(Equal(3))
+
+					_, metadata := support.WriteBlockArgsForCall(2)
+					m3 := &raftprotos.BlockMetadata{}
+					proto.Unmarshal(metadata, m3)
+
+					// expect second block to be replayed
+					Expect(m3.Index).To(Equal(m2.Index))
+				})
+
+				Context("WAL file is not readable", func() {
+					It("failed to load wal", func() {
+						files, err := ioutil.ReadDir(walDir)
+						Expect(err).NotTo(HaveOccurred())
+						for _, f := range files {
+							os.Chmod(path.Join(walDir, f.Name()), 0300)
+						}
+						newChain, err := etcdraft.NewChain(support, opt, configurator, nil, observe)
+						Expect(newChain).To(BeNil())
+						Expect(err).To(MatchError(ContainSubstring("failed to open existing WAL")))
+					})
+				})
+			})
+		})
+
+		Context("WAL dir is broken", func() {
+			It("fails to bootstrap new raft node", func() {
+				support := &consensusmocks.FakeConsenterSupport{}
+
+				f, err := ioutil.TempFile("", "wal-")
+				Expect(err).NotTo(HaveOccurred())
+				defer os.Remove(f.Name())
+
+				By("WAL dir is a file")
+				chain, err := etcdraft.NewChain(support, etcdraft.Options{WALDir: f.Name()}, configurator, nil, observe)
+				Expect(chain).To(BeNil())
+				Expect(err).To(MatchError(ContainSubstring("is not a directory")))
+
+				d, err := ioutil.TempDir("", "wal-")
+				Expect(err).NotTo(HaveOccurred())
+				err = os.Chmod(d, 0500)
+				Expect(err).NotTo(HaveOccurred())
+
+				defer func() {
+					os.Chmod(d, 0700)
+					os.RemoveAll(d)
+				}()
+
+				By("WAL dir is not writeable")
+				chain, err = etcdraft.NewChain(support, etcdraft.Options{WALDir: d}, configurator, nil, observe)
+				Expect(chain).To(BeNil())
+				Expect(err).To(MatchError(ContainSubstring("is not writeable")))
+
+				By("WAL parent dir is not writeable")
+				chain, err = etcdraft.NewChain(support, etcdraft.Options{WALDir: path.Join(d, "wal-dir")}, configurator, nil, observe)
+				Expect(chain).To(BeNil())
+				Expect(err).To(MatchError(ContainSubstring("failed to mkdir for wal")))
+			})
+		})
 	})
 
 	Describe("Multiple raft nodes", func() {
 		var (
+			err        error
 			network    *network
 			channelID  string
 			timeout    time.Duration
 			c1, c2, c3 *chain
+			dataDir    string
 		)
 
 		BeforeEach(func() {
 			channelID = "multi-node-channel"
 			timeout = 10 * time.Second
 
-			network = createNetwork(timeout, channelID, []uint64{1, 2, 3})
+			dataDir, err = ioutil.TempDir("", "wal-")
+			Expect(err).NotTo(HaveOccurred())
+
+			network = createNetwork(timeout, channelID, dataDir, []uint64{1, 2, 3})
 			c1 = network.get(1)
 			c2 = network.get(2)
 			c3 = network.get(3)
+		})
+
+		AfterEach(func() {
+			os.RemoveAll(dataDir)
 		})
 
 		When("2/3 nodes are running", func() {
@@ -815,7 +962,7 @@ type chain struct {
 	*etcdraft.Chain
 }
 
-func newChain(timeout time.Duration, channel string, id uint64, all []uint64) *chain {
+func newChain(timeout time.Duration, channel string, walDir string, id uint64, all []uint64) *chain {
 	rpc := &mocks.FakeRPC{}
 	clock := fakeclock.NewFakeClock(time.Now())
 	storage := raft.NewMemoryStorage()
@@ -836,6 +983,7 @@ func newChain(timeout time.Duration, channel string, id uint64, all []uint64) *c
 		Peers:           peers,
 		Logger:          flogging.NewFabricLogger(zap.NewNop()),
 		Storage:         storage,
+		WALDir:          walDir,
 	}
 
 	support := &consensusmocks.FakeConsenterSupport{}
@@ -871,11 +1019,14 @@ func newChain(timeout time.Duration, channel string, id uint64, all []uint64) *c
 
 type network map[uint64]*chain
 
-func createNetwork(timeout time.Duration, channel string, ids []uint64) *network {
+func createNetwork(timeout time.Duration, channel string, dataDir string, ids []uint64) *network {
 	n := make(network)
 
 	for _, i := range ids {
-		c := newChain(timeout, channel, i, ids)
+		dir, err := ioutil.TempDir(dataDir, fmt.Sprintf("node-%d-", i))
+		Expect(err).NotTo(HaveOccurred())
+
+		c := newChain(timeout, channel, dir, i, ids)
 		n[i] = c
 	}
 

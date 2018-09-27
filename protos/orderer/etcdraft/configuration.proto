@@ -37,3 +37,7 @@ message Options {
 	uint32 max_inflight_msgs = 4;
 	uint64 max_size_per_msg = 5;
 }
+
+message BlockMetadata {
+  uint64 index = 1;
+}

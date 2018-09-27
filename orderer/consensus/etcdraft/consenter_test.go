@@ -7,6 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 package etcdraft_test
 
 import (
+	"io/ioutil"
+	"os"
+
 	"github.com/hyperledger/fabric/common/flogging"
 	mockconfig "github.com/hyperledger/fabric/common/mocks/config"
 	clustermocks "github.com/hyperledger/fabric/orderer/common/cluster/mocks"
@@ -114,7 +117,12 @@ var _ = Describe("Consenter", func() {
 		metadata := utils.MarshalOrPanic(m)
 		support.SharedConfigReturns(&mockconfig.Orderer{ConsensusMetadataVal: metadata})
 
+		dir, err := ioutil.TempDir("", "wal-")
+		Expect(err).NotTo(HaveOccurred())
+		defer os.RemoveAll(dir)
+
 		consenter := newConsenter(chainGetter)
+		consenter.WALDir = dir
 
 		chain, err := consenter.HandleChain(support, nil)
 		Expect(err).NotTo(HaveOccurred())
@@ -162,6 +170,35 @@ var _ = Describe("Consenter", func() {
 		Expect(err).To(MatchError("etcdraft options have not been provided"))
 	})
 
+	It("fails to handle chain if WAL is expected but no data found", func() {
+		certBytes := []byte("cert.orderer0.org0")
+		m := &etcdraftproto.Metadata{
+			Consenters: []*etcdraftproto.Consenter{
+				{ServerTlsCert: certBytes},
+			},
+			Options: &etcdraftproto.Options{
+				TickInterval:    100,
+				ElectionTick:    10,
+				HeartbeatTick:   1,
+				MaxInflightMsgs: 256,
+				MaxSizePerMsg:   1048576,
+			},
+		}
+		metadata := utils.MarshalOrPanic(m)
+		support.SharedConfigReturns(&mockconfig.Orderer{ConsensusMetadataVal: metadata})
+
+		dir, err := ioutil.TempDir("", "wal-")
+		Expect(err).NotTo(HaveOccurred())
+		defer os.RemoveAll(dir)
+
+		consenter := newConsenter(chainGetter)
+		consenter.WALDir = dir
+
+		d := &etcdraftproto.BlockMetadata{Index: uint64(2)}
+		chain, err := consenter.HandleChain(support, &common.Metadata{Value: utils.MarshalOrPanic(d)})
+		Expect(chain).To(BeNil())
+		Expect(err).To(MatchError(ContainSubstring("no WAL data found")))
+	})
 })
 
 func newConsenter(chainGetter *mocks.ChainGetter) *etcdraft.Consenter {

@@ -10,12 +10,17 @@ import (
 	"context"
 	"encoding/pem"
 	"fmt"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
 	"code.cloudfoundry.org/clock"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/coreos/etcd/wal"
+	"github.com/coreos/etcd/wal/walpb"
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/common/configtx"
 	"github.com/hyperledger/fabric/common/flogging"
@@ -35,6 +40,7 @@ import (
 type Storage interface {
 	raft.Storage
 	Append(entries []raftpb.Entry) error
+	SetHardState(st raftpb.HardState) error
 }
 
 //go:generate mockery -dir . -name Configurator -case underscore -output ./mocks/
@@ -58,6 +64,7 @@ type Options struct {
 
 	Clock clock.Clock
 
+	WALDir  string
 	Storage Storage
 	Logger  *flogging.FabricLogger
 
@@ -66,7 +73,14 @@ type Options struct {
 	HeartbeatTick   int
 	MaxSizePerMsg   uint64
 	MaxInflightMsgs int
+	Applied         uint64
 	Peers           []raft.Peer
+}
+
+// block encapsulates block data and its raft index
+type block struct {
+	b *common.Block
+	i uint64
 }
 
 // Chain implements consensus.Chain interface.
@@ -78,7 +92,7 @@ type Chain struct {
 	id     string
 
 	submitC  chan *orderer.SubmitRequest
-	commitC  chan *common.Block
+	commitC  chan block
 	observeC chan<- uint64 // Notifies external observer on leader change
 	haltC    chan struct{}
 	doneC    chan struct{}
@@ -92,8 +106,11 @@ type Chain struct {
 	leader       uint64
 	appliedIndex uint64
 
+	hasWAL bool // denote if this node is a new raft node
+
 	node    raft.Node
 	storage Storage
+	wal     *wal.WAL
 	opts    Options
 
 	logger *flogging.FabricLogger
@@ -106,24 +123,112 @@ func NewChain(
 	conf Configurator,
 	rpc RPC,
 	observe chan<- uint64) (*Chain, error) {
+
+	var err error
+
+	hasWAL := wal.Exist(opts.WALDir)
+	if !hasWAL && opts.Applied != 0 {
+		return nil, errors.Errorf("last applied index is non-zero (%d), whereas no WAL data found at %s", opts.Applied, opts.WALDir)
+	}
+
+	if err = mkdir(opts.WALDir); err != nil {
+		return nil, errors.Errorf("failed to mkdir for wal: %s", err)
+	}
+
+	lg := opts.Logger.With("channel", support.ChainID(), "node", opts.RaftID)
+	w, err := replayWAL(lg, hasWAL, opts.WALDir, opts.Storage)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Chain{
 		id:           support.ChainID(),
 		configurator: conf,
 		rpc:          rpc,
 		raftID:       opts.RaftID,
 		submitC:      make(chan *orderer.SubmitRequest),
-		commitC:      make(chan *common.Block),
+		commitC:      make(chan block),
 		haltC:        make(chan struct{}),
 		doneC:        make(chan struct{}),
 		resignC:      make(chan struct{}),
 		startC:       make(chan struct{}),
 		observeC:     observe,
 		support:      support,
+		hasWAL:       hasWAL,
+		appliedIndex: opts.Applied,
 		clock:        opts.Clock,
-		logger:       opts.Logger.With("channel", support.ChainID(), "node", opts.RaftID),
+		logger:       lg,
 		storage:      opts.Storage,
+		wal:          w,
 		opts:         opts,
 	}, nil
+}
+
+func mkdir(d string) error {
+	if d == "" {
+		return errors.Errorf("dir path cannot be empty")
+	}
+
+	dir, err := os.Stat(d)
+	if err != nil {
+		if os.IsNotExist(err) {
+			err = os.MkdirAll(d, 0750)
+			if err == nil {
+				return nil
+			}
+		}
+
+		return err
+	}
+
+	if !dir.IsDir() {
+		return errors.Errorf("%s is not a directory", d)
+	}
+
+	if e := isWriteable(d); e != nil {
+		return errors.Errorf("WAL directory %s is not writeable: %s", d, e)
+	}
+
+	return nil
+}
+
+func replayWAL(logger *flogging.FabricLogger, hasWAL bool, walDir string, storage Storage) (*wal.WAL, error) {
+	var w *wal.WAL
+	var err error
+	if !hasWAL {
+		logger.Debugf("No WAL data found, creating new WAL at %s", walDir)
+		w, err = wal.Create(walDir, nil)
+		if err != nil {
+			return nil, errors.Errorf("failed to create new WAL: %s", err)
+		}
+		w.Close()
+	}
+
+	var walsnap walpb.Snapshot // TODO support raft snapshot
+	if w, err = wal.Open(walDir, walsnap); err != nil {
+		return nil, errors.Errorf("failed to open existing WAL: %s", err)
+	}
+
+	_, st, ents, err := w.ReadAll()
+	if err != nil {
+		return nil, errors.Errorf("failed to read WAL: %s", err)
+	}
+
+	logger.Debugf("Setting HardState to {Term: %d, Commit: %d}", st.Term, st.Commit)
+	storage.SetHardState(st) // MemoryStorage.SetHardState always returns nil
+
+	logger.Debugf("Appending %d entries to memory storage", len(ents))
+	storage.Append(ents) // MemoryStorage.Append always return nil
+
+	return w, nil
+}
+
+func isWriteable(dir string) error {
+	f := filepath.Join(dir, ".touch")
+	if err := ioutil.WriteFile(f, []byte(""), 0700); err != nil {
+		return err
+	}
+	return os.Remove(f)
 }
 
 // Start instructs the orderer to begin serving the chain and keep it current.
@@ -146,7 +251,14 @@ func (c *Chain) Start() {
 		return
 	}
 
-	c.node = raft.StartNode(config, c.opts.Peers)
+	if !c.hasWAL {
+		c.logger.Infof("starting new raft node")
+		c.node = raft.StartNode(config, c.opts.Peers)
+	} else {
+		c.logger.Infof("restarting raft node")
+		c.node = raft.RestartNode(config)
+	}
+
 	close(c.startC)
 
 	go c.serveRaft()
@@ -369,13 +481,15 @@ func (c *Chain) serveRequest() {
 	}
 }
 
-func (c *Chain) writeBlock(b *common.Block) {
-	if utils.IsConfigBlock(b) {
-		c.support.WriteConfigBlock(b, nil)
+func (c *Chain) writeBlock(b block) {
+	m := utils.MarshalOrPanic(&etcdraft.BlockMetadata{Index: b.i})
+
+	if utils.IsConfigBlock(b.b) {
+		c.support.WriteConfigBlock(b.b, m)
 		return
 	}
 
-	c.support.WriteBlock(b, nil)
+	c.support.WriteBlock(b.b, m)
 }
 
 // Orders the envelope in the `msg` content. SubmitRequest.
@@ -424,11 +538,7 @@ func (c *Chain) commitBatches(batches ...[]*common.Envelope) error {
 
 		select {
 		case block := <-c.commitC:
-			if utils.IsConfigBlock(block) {
-				c.support.WriteConfigBlock(block, nil)
-			} else {
-				c.support.WriteBlock(block, nil)
-			}
+			c.writeBlock(block)
 
 		case <-c.resignC:
 			return errors.Errorf("abort committing blocks because of leadership lost")
@@ -450,6 +560,7 @@ func (c *Chain) serveRaft() {
 			c.node.Tick()
 
 		case rd := <-c.node.Ready():
+			c.wal.Save(rd.HardState, rd.Entries)
 			c.storage.Append(rd.Entries)
 			c.apply(c.entriesToApply(rd.CommittedEntries))
 			c.node.Advance()
@@ -475,10 +586,14 @@ func (c *Chain) serveRaft() {
 			}
 
 		case <-c.haltC:
-			close(c.doneC)
 			ticker.Stop()
 			c.node.Stop()
-			c.logger.Infof("Raft node %x stopped", c.raftID)
+			if err := c.wal.Close(); err != nil {
+				c.logger.Fatalf("Failed to stop raft because: %s", err)
+			}
+
+			close(c.doneC)
+			c.logger.Infof("Raft stopped", c.raftID)
 			return
 		}
 	}
@@ -492,7 +607,7 @@ func (c *Chain) apply(ents []raftpb.Entry) {
 				break
 			}
 
-			c.commitC <- utils.UnmarshalBlockOrPanic(ents[i].Data)
+			c.commitC <- block{utils.UnmarshalBlockOrPanic(ents[i].Data), ents[i].Index}
 
 		case raftpb.EntryConfChange:
 			var cc raftpb.ConfChange
