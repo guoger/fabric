@@ -110,15 +110,37 @@
   revision = "c6cef34830231743494fe2969284df7b82cc0ad0"
 
 [[projects]]
-  digest = "1:870c424b15d487042f1da88e513d3d4c6cd73190f1862f5fd37528edff739baa"
+  digest = "1:19fe0160ba5281f25062c4704df82bac66ac11fe6780f2752443405a79c462d0"
   name = "github.com/coreos/etcd"
   packages = [
+    "pkg/crc",
+    "pkg/fileutil",
+    "pkg/ioutil",
+    "pkg/pbutil",
     "raft",
     "raft/raftpb",
+    "wal",
+    "wal/walpb",
   ]
   pruneopts = "UT"
   revision = "33245c6b5b49130ca99280408fadfab01aac0e48"
   version = "v3.3.8"
+
+[[projects]]
+  digest = "1:e3b55611cb86797357cc1cd2b3d38faf07ae3c4079f04b32e84d497422ab0d60"
+  name = "github.com/coreos/go-systemd"
+  packages = ["journal"]
+  pruneopts = "NUT"
+  revision = "39ca1b05acc7ad1220e09f133283b8859a8b71ab"
+  version = "v17"
+
+[[projects]]
+  digest = "1:22332f13485f13511589dc1f59eb97594e8636d3606b69d172a9a85421ad465d"
+  name = "github.com/coreos/pkg"
+  packages = ["capnslog"]
+  pruneopts = "NUT"
+  revision = "97fdf19511ea361ae1c100dd393cc47f8dcfa1e1"
+  version = "v4"
 
 [[projects]]
   digest = "1:a2c1d0e43bd3baaa071d1b9ed72c27d78169b2b269f71c105ac4ba34b1be4a39"
@@ -858,6 +880,7 @@
     "github.com/cactus/go-statsd-client/statsd",
     "github.com/coreos/etcd/raft",
     "github.com/coreos/etcd/raft/raftpb",
+    "github.com/coreos/etcd/wal",
     "github.com/davecgh/go-spew/spew",
     "github.com/fsouza/go-dockerclient",
     "github.com/golang/protobuf/jsonpb",
