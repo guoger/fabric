@@ -35,3 +35,8 @@ message Options {
 	uint32 max_inflight_msgs = 4;
 	uint64 max_size_per_msg = 5;
 }
+
+// Metadata to be stored with a block in order to reconstruct the state for etcd/raft.
+message BlockMetaData {
+  uint64 index = 1; // Index of an etcd/raft entry
+}

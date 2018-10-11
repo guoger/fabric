@@ -10,12 +10,17 @@ import (
 	"context"
 	"encoding/pem"
 	"fmt"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
 	"code.cloudfoundry.org/clock"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/coreos/etcd/wal"
+	"github.com/coreos/etcd/wal/walpb"
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/common/configtx"
 	"github.com/hyperledger/fabric/common/flogging"
@@ -35,6 +40,7 @@ import (
 type Storage interface {
 	raft.Storage
 	Append(entries []raftpb.Entry) error
+	SetHardState(st raftpb.HardState) error
 }
 
 //go:generate mockery -dir . -name Configurator -case underscore -output ./mocks/
@@ -53,12 +59,18 @@ type RPC interface {
 	SendSubmit(dest uint64, request *orderer.SubmitRequest) error
 }
 
+type block struct {
+	b *common.Block
+	i uint64
+}
+
 // Options contains all the configurations relevant to the chain.
 type Options struct {
 	RaftID uint64
 
 	Clock clock.Clock
 
+	WALDir  string
 	Storage Storage
 	Logger  *flogging.FabricLogger
 
@@ -67,6 +79,7 @@ type Options struct {
 	HeartbeatTick   int
 	MaxSizePerMsg   uint64
 	MaxInflightMsgs int
+	Applied         uint64
 	Peers           []raft.Peer
 }
 
@@ -79,7 +92,7 @@ type Chain struct {
 	channelID string
 
 	submitC  chan *orderer.SubmitRequest
-	commitC  chan *common.Block
+	commitC  chan block
 	observeC chan<- uint64 // Notifies external observer on leader change (passed in optionally as an argument for tests)
 	haltC    chan struct{} // Signals to goroutines that the chain is halting
 	doneC    chan struct{} // Closes when the chain halts
@@ -93,8 +106,11 @@ type Chain struct {
 	leader       uint64
 	appliedIndex uint64
 
+	hasWAL bool // indicate if this is a fresh raft node
+
 	node    raft.Node
 	storage Storage
+	wal     *wal.WAL
 	opts    Options
 
 	logger *flogging.FabricLogger
@@ -107,22 +123,41 @@ func NewChain(
 	conf Configurator,
 	rpc RPC,
 	observeC chan<- uint64) (*Chain, error) {
+
+	hasWAL := wal.Exist(opts.WALDir)
+	if !hasWAL && opts.Applied != 0 {
+		return nil, errors.Errorf("last applied index is non-zero (%d), whereas no WAL data found at %s", opts.Applied, opts.WALDir)
+	}
+
+	if err := mkdir(opts.WALDir); err != nil {
+		return nil, err
+	}
+
+	lg := opts.Logger.With("channel", support.ChainID(), "node", opts.RaftID)
+	w, err := replayWAL(lg, hasWAL, opts.WALDir, opts.Storage)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Chain{
 		configurator: conf,
 		rpc:          rpc,
 		channelID:    support.ChainID(),
 		raftID:       opts.RaftID,
 		submitC:      make(chan *orderer.SubmitRequest),
-		commitC:      make(chan *common.Block),
+		commitC:      make(chan block),
 		haltC:        make(chan struct{}),
 		doneC:        make(chan struct{}),
 		resignC:      make(chan struct{}),
 		startC:       make(chan struct{}),
 		observeC:     observeC,
 		support:      support,
+		hasWAL:       hasWAL,
+		appliedIndex: opts.Applied,
 		clock:        opts.Clock,
-		logger:       opts.Logger.With("channel", support.ChainID(), "node", opts.RaftID),
+		logger:       lg,
 		storage:      opts.Storage,
+		wal:          w,
 		opts:         opts,
 	}, nil
 }
@@ -147,7 +182,15 @@ func (c *Chain) Start() {
 		return
 	}
 
-	c.node = raft.StartNode(config, c.opts.Peers)
+	if !c.hasWAL {
+		c.logger.Infof("starting new raft node %d", c.raftID)
+		c.node = raft.StartNode(config, c.opts.Peers)
+	} else {
+		c.logger.Infof("restarting raft node %d", c.raftID)
+		c.node = raft.RestartNode(config)
+	}
+
+	fmt.Printf("closing it\n")
 	close(c.startC)
 
 	go c.serveRaft()
@@ -255,7 +298,10 @@ func (c *Chain) isRunning() error {
 
 // Step passes the given StepRequest message to the raft.Node instance
 func (c *Chain) Step(req *orderer.StepRequest, sender uint64) error {
+	c.logger.Debugf("received step from %d", sender)
 	if err := c.isRunning(); err != nil {
+		c.logger.Debugf("not running: %s", err)
+
 		return err
 	}
 
@@ -267,6 +313,7 @@ func (c *Chain) Step(req *orderer.StepRequest, sender uint64) error {
 	if err := c.node.Step(context.TODO(), *stepMsg); err != nil {
 		return fmt.Errorf("failed to process Raft Step message: %s", err)
 	}
+	c.logger.Debugf("stepped from %d", sender)
 
 	return nil
 }
@@ -370,13 +417,15 @@ func (c *Chain) serveRequest() {
 	}
 }
 
-func (c *Chain) writeBlock(b *common.Block) {
-	if utils.IsConfigBlock(b) {
-		c.support.WriteConfigBlock(b, nil)
+func (c *Chain) writeBlock(b block) {
+	m := utils.MarshalOrPanic(&etcdraft.BlockMetaData{Index: b.i})
+
+	if utils.IsConfigBlock(b.b) {
+		c.support.WriteConfigBlock(b.b, m)
 		return
 	}
 
-	c.support.WriteBlock(b, nil)
+	c.support.WriteBlock(b.b, m)
 }
 
 // Orders the envelope in the `msg` content. SubmitRequest.
@@ -425,11 +474,7 @@ func (c *Chain) commitBatches(batches ...[]*common.Envelope) error {
 
 		select {
 		case block := <-c.commitC:
-			if utils.IsConfigBlock(block) {
-				c.support.WriteConfigBlock(block, nil)
-			} else {
-				c.support.WriteBlock(block, nil)
-			}
+			c.writeBlock(block)
 
 		case <-c.resignC:
 			return errors.Errorf("aborted block committing: lost leadership")
@@ -448,11 +493,14 @@ func (c *Chain) serveRaft() {
 	for {
 		select {
 		case <-ticker.C():
+			c.logger.Debugf("tick")
 			c.node.Tick()
 
 		case rd := <-c.node.Ready():
 			c.storage.Append(rd.Entries)
+			c.wal.Save(rd.HardState, rd.Entries)
 			c.apply(c.entriesToApply(rd.CommittedEntries))
+			c.logger.Debugf("advance")
 			c.node.Advance()
 			c.send(rd.Messages)
 
@@ -476,10 +524,11 @@ func (c *Chain) serveRaft() {
 			}
 
 		case <-c.haltC:
-			close(c.doneC)
 			ticker.Stop()
 			c.node.Stop()
+			c.wal.Close()
 			c.logger.Infof("Raft node %x stopped", c.raftID)
+			close(c.doneC)
 			return
 		}
 	}
@@ -493,7 +542,7 @@ func (c *Chain) apply(ents []raftpb.Entry) {
 				break
 			}
 
-			c.commitC <- utils.UnmarshalBlockOrPanic(ents[i].Data)
+			c.commitC <- block{utils.UnmarshalBlockOrPanic(ents[i].Data), ents[i].Index}
 
 		case raftpb.EntryConfChange:
 			var cc raftpb.ConfChange
@@ -602,4 +651,67 @@ func (c *Chain) pemToDER(pemBytes []byte, id uint64, certType string) ([]byte, e
 		return nil, errors.Errorf("invalid PEM block")
 	}
 	return bl.Bytes, nil
+}
+
+func mkdir(d string) error {
+	dir, err := os.Stat(d)
+	if err != nil {
+		if os.IsNotExist(err) {
+			e := os.MkdirAll(d, 0750)
+			if e != nil {
+				return errors.Errorf("failed to mkdir -p %s: %s", d, e)
+			}
+		} else {
+			return errors.Errorf("failed to stat WALDir %s: %s", d, err)
+		}
+	} else {
+		if !dir.IsDir() {
+			return errors.Errorf("%s is not a directory", d)
+		}
+
+		if e := isWriteable(d); e != nil {
+			return errors.Errorf("WAL directory %s is not writeable: %s", d, e)
+		}
+	}
+
+	return nil
+}
+
+func replayWAL(logger *flogging.FabricLogger, hasWAL bool, walDir string, storage Storage) (*wal.WAL, error) {
+	var w *wal.WAL
+	var err error
+	if !hasWAL {
+		logger.Debugf("No WAL data found, creating new WAL at %s", walDir)
+		w, err = wal.Create(walDir, nil)
+		if err != nil {
+			return nil, errors.Errorf("failed to create new WAL: %s", err)
+		}
+		w.Close()
+	}
+
+	var walsnap walpb.Snapshot // TODO support raft snapshot
+	if w, err = wal.Open(walDir, walsnap); err != nil {
+		return nil, errors.Errorf("failed to open existing WAL: %s", err)
+	}
+
+	_, st, ents, err := w.ReadAll()
+	if err != nil {
+		return nil, errors.Errorf("failed to read WAL: %s", err)
+	}
+
+	logger.Debugf("Setting HardState to {Term: %d, Commit: %d}", st.Term, st.Commit)
+	storage.SetHardState(st) // MemoryStorage.SetHardState always returns nil
+
+	logger.Debugf("Appending %d entries to memory storage", len(ents))
+	storage.Append(ents) // MemoryStorage.Append always return nil
+
+	return w, nil
+}
+
+func isWriteable(dir string) error {
+	f := filepath.Join(dir, ".touch")
+	if err := ioutil.WriteFile(f, []byte(""), 0700); err != nil {
+		return err
+	}
+	return os.Remove(f)
 }
