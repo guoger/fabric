@@ -8,6 +8,7 @@ package etcdraft
 
 import (
 	"bytes"
+	"path"
 	"reflect"
 	"time"
 
@@ -42,6 +43,7 @@ type Consenter struct {
 	*Dispatcher
 	Chains ChainGetter
 	Logger *flogging.FabricLogger
+	WALDir string // WAL data of <my-channel> is stored in WALDir/<my-channel>
 	Cert   []byte
 }
 
@@ -109,6 +111,16 @@ func (c *Consenter) HandleChain(support consensus.ConsenterSupport, metadata *co
 		peers[i].ID = uint64(i + 1)
 	}
 
+	var applied uint64
+	if metadata != nil && metadata.Value != nil {
+		d := &etcdraft.BlockMetaData{}
+		if err := proto.Unmarshal(metadata.Value, d); err != nil {
+			return nil, errors.Errorf("failed to unmarshal block metadata: %s", err)
+		}
+
+		applied = d.Index
+	}
+
 	opts := Options{
 		RaftID:  id,
 		Clock:   clock.NewClock(),
@@ -120,6 +132,9 @@ func (c *Consenter) HandleChain(support consensus.ConsenterSupport, metadata *co
 		HeartbeatTick:   int(m.Options.HeartbeatTick),
 		MaxInflightMsgs: int(m.Options.MaxInflightMsgs),
 		MaxSizePerMsg:   m.Options.MaxSizePerMsg,
+		Applied:         applied,
+
+		WALDir: path.Join(c.WALDir, support.ChainID()),
 
 		Peers: peers,
 	}
