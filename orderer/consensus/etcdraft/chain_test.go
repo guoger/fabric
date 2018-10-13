@@ -100,7 +100,7 @@ var _ = Describe("Chain", func() {
 				MaxInflightMsgs: 256,
 				Peers:           []raft.Peer{{ID: 1}},
 				Logger:          logger,
-				Storage:         storage,
+				MemoryStorage:   storage,
 				WALDir:          walDir,
 			}
 			support = &consensusmocks.FakeConsenterSupport{}
@@ -537,8 +537,8 @@ var _ = Describe("Chain", func() {
 					)
 
 					BeforeEach(func() {
-						newOpts = opts                            // make a copy of Options
-						newOpts.Storage = raft.NewMemoryStorage() // create a fresh MemoryStorage
+						newOpts = opts                                  // make a copy of Options
+						newOpts.MemoryStorage = raft.NewMemoryStorage() // create a fresh MemoryStorage
 					})
 
 					JustBeforeEach(func() {
@@ -988,7 +988,7 @@ func newChain(timeout time.Duration, channel string, walDir string, applied uint
 		MaxInflightMsgs: 256,
 		Peers:           peers,
 		Logger:          flogging.NewFabricLogger(zap.NewNop()),
-		Storage:         storage,
+		MemoryStorage:   storage,
 		WALDir:          walDir,
 		Applied:         applied,
 	}

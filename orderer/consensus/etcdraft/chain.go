@@ -10,17 +10,12 @@ import (
 	"context"
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
-	"os"
-	"path/filepath"
 	"sync/atomic"
 	"time"
 
 	"code.cloudfoundry.org/clock"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
-	"github.com/coreos/etcd/wal"
-	"github.com/coreos/etcd/wal/walpb"
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/common/configtx"
 	"github.com/hyperledger/fabric/common/flogging"
@@ -32,16 +27,6 @@ import (
 	"github.com/hyperledger/fabric/protos/utils"
 	"github.com/pkg/errors"
 )
-
-// Storage is currently backed by etcd/raft.MemoryStorage. This interface is
-// defined to expose dependencies of fsm so that it may be swapped in the
-// future. TODO(jay) Add other necessary methods to this interface once we need
-// them in implementation, e.g. ApplySnapshot.
-type Storage interface {
-	raft.Storage
-	Append(entries []raftpb.Entry) error
-	SetHardState(st raftpb.HardState) error
-}
 
 //go:generate mockery -dir . -name Configurator -case underscore -output ./mocks/
 
@@ -74,9 +59,9 @@ type Options struct {
 
 	Clock clock.Clock
 
-	WALDir  string
-	Storage Storage
-	Logger  *flogging.FabricLogger
+	WALDir        string
+	MemoryStorage MemoryStorage
+	Logger        *flogging.FabricLogger
 
 	TickInterval    time.Duration
 	ElectionTick    int
@@ -114,7 +99,6 @@ type Chain struct {
 
 	node    raft.Node
 	storage Storage
-	wal     *wal.WAL
 	opts    Options
 
 	logger *flogging.FabricLogger
@@ -128,18 +112,14 @@ func NewChain(
 	rpc RPC,
 	observeC chan<- uint64) (*Chain, error) {
 
-	hasWAL := wal.Exist(opts.WALDir)
-	if !hasWAL && opts.Applied != 0 {
-		return nil, errors.Errorf("last applied index is non-zero (%d), whereas no WAL data found at %s", opts.Applied, opts.WALDir)
+	lg := opts.Logger.With("channel", support.ChainID(), "node", opts.RaftID)
+
+	storage, hasWAL, err := Restore(lg, opts.Applied, opts.WALDir, opts.MemoryStorage)
+	if err != nil {
+		return nil, errors.Errorf("failed to restore persited raft data: %s", err)
 	}
 
 	if err := mkdir(opts.WALDir); err != nil {
-		return nil, err
-	}
-
-	lg := opts.Logger.With("channel", support.ChainID(), "node", opts.RaftID)
-	w, err := replayWAL(lg, hasWAL, opts.WALDir, opts.Storage)
-	if err != nil {
 		return nil, err
 	}
 
@@ -160,8 +140,7 @@ func NewChain(
 		appliedIndex: opts.Applied,
 		clock:        opts.Clock,
 		logger:       lg,
-		storage:      opts.Storage,
-		wal:          w,
+		storage:      storage,
 		opts:         opts,
 	}, nil
 }
@@ -176,7 +155,7 @@ func (c *Chain) Start() {
 		MaxSizePerMsg:             c.opts.MaxSizePerMsg,
 		MaxInflightMsgs:           c.opts.MaxInflightMsgs,
 		Logger:                    c.logger,
-		Storage:                   c.opts.Storage,
+		Storage:                   c.opts.MemoryStorage,
 		Applied:                   c.opts.Applied,
 		DisableProposalForwarding: true, // This prevents blocks from being accidentally proposed by followers
 	}
@@ -421,9 +400,12 @@ func (c *Chain) writeBlock(b block) {
 	m := utils.MarshalOrPanic(&etcdraft.BlockMetaData{Index: b.i})
 
 	if utils.IsConfigBlock(b.b) {
+		fmt.Printf("writing config block with index %d\n", b.i)
+
 		c.support.WriteConfigBlock(b.b, m)
 		return
 	}
+	fmt.Printf("writing block with index %d\n", b.i)
 
 	c.support.WriteBlock(b.b, m)
 }
@@ -496,10 +478,10 @@ func (c *Chain) serveRaft() {
 			c.node.Tick()
 
 		case rd := <-c.node.Ready():
-			c.storage.Append(rd.Entries)
-			if err := c.wal.Save(rd.HardState, rd.Entries); err != nil {
-				c.logger.Panicf("failed to persist hardstate and entries to wal: %s", err)
+			if err := c.storage.Store(rd.Entries, rd.HardState); err != nil {
+				c.logger.Panicf("Failed to persist etcd/raft data: %s", err)
 			}
+
 			c.apply(c.entriesToApply(rd.CommittedEntries))
 			c.node.Advance()
 			c.send(rd.Messages)
@@ -526,7 +508,7 @@ func (c *Chain) serveRaft() {
 		case <-c.haltC:
 			ticker.Stop()
 			c.node.Stop()
-			c.wal.Close()
+			c.storage.Close()
 			c.logger.Infof("Raft node %x stopped", c.raftID)
 			close(c.doneC) // close after all the artifacts are closed
 			return
@@ -651,67 +633,4 @@ func (c *Chain) pemToDER(pemBytes []byte, id uint64, certType string) ([]byte, e
 		return nil, errors.Errorf("invalid PEM block")
 	}
 	return bl.Bytes, nil
-}
-
-func mkdir(d string) error {
-	dir, err := os.Stat(d)
-	if err != nil {
-		if os.IsNotExist(err) {
-			e := os.MkdirAll(d, 0750)
-			if e != nil {
-				return errors.Errorf("failed to mkdir -p %s: %s", d, e)
-			}
-		} else {
-			return errors.Errorf("failed to stat WALDir %s: %s", d, err)
-		}
-	} else {
-		if !dir.IsDir() {
-			return errors.Errorf("%s is not a directory", d)
-		}
-
-		if e := isWriteable(d); e != nil {
-			return errors.Errorf("WAL directory %s is not writeable: %s", d, e)
-		}
-	}
-
-	return nil
-}
-
-func replayWAL(logger *flogging.FabricLogger, hasWAL bool, walDir string, storage Storage) (*wal.WAL, error) {
-	var w *wal.WAL
-	var err error
-	if !hasWAL {
-		logger.Debugf("No WAL data found, creating new WAL at %s", walDir)
-		w, err = wal.Create(walDir, nil)
-		if err != nil {
-			return nil, errors.Errorf("failed to create new WAL: %s", err)
-		}
-		w.Close()
-	}
-
-	var walsnap walpb.Snapshot // TODO support raft snapshot
-	if w, err = wal.Open(walDir, walsnap); err != nil {
-		return nil, errors.Errorf("failed to open existing WAL: %s", err)
-	}
-
-	_, st, ents, err := w.ReadAll()
-	if err != nil {
-		return nil, errors.Errorf("failed to read WAL: %s", err)
-	}
-
-	logger.Debugf("Setting HardState to {Term: %d, Commit: %d}", st.Term, st.Commit)
-	storage.SetHardState(st) // MemoryStorage.SetHardState always returns nil
-
-	logger.Debugf("Appending %d entries to memory storage", len(ents))
-	storage.Append(ents) // MemoryStorage.Append always return nil
-
-	return w, nil
-}
-
-func isWriteable(dir string) error {
-	f := filepath.Join(dir, ".touch")
-	if err := ioutil.WriteFile(f, []byte(""), 0700); err != nil {
-		return err
-	}
-	return os.Remove(f)
 }
