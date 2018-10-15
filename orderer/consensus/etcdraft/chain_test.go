@@ -130,7 +130,7 @@ var _ = Describe("Chain", func() {
 				MaxInflightMsgs: 256,
 				RaftMetadata:    membership,
 				Logger:          logger,
-				Storage:         storage,
+				MemoryStorage:   storage,
 				WALDir:          walDir,
 			}
 
@@ -581,8 +581,8 @@ var _ = Describe("Chain", func() {
 					)
 
 					BeforeEach(func() {
-						newOpts = opts                            // make a copy of Options
-						newOpts.Storage = raft.NewMemoryStorage() // create a fresh MemoryStorage
+						newOpts = opts                                  // make a copy of Options
+						newOpts.MemoryStorage = raft.NewMemoryStorage() // create a fresh MemoryStorage
 					})
 
 					JustBeforeEach(func() {
@@ -681,10 +681,10 @@ var _ = Describe("Chain", func() {
 						chain, err := etcdraft.NewChain(
 							support,
 							etcdraft.Options{
-								WALDir:       f.Name(),
-								Logger:       logger,
-								Storage:      storage,
-								RaftMetadata: &raftprotos.RaftMetadata{},
+								WALDir:        f.Name(),
+								Logger:        logger,
+								MemoryStorage: storage,
+								RaftMetadata:  &raftprotos.RaftMetadata{},
 							},
 							configurator,
 							nil,
@@ -710,10 +710,10 @@ var _ = Describe("Chain", func() {
 						chain, err := etcdraft.NewChain(
 							support,
 							etcdraft.Options{
-								WALDir:       d,
-								Logger:       logger,
-								Storage:      storage,
-								RaftMetadata: &raftprotos.RaftMetadata{},
+								WALDir:        d,
+								Logger:        logger,
+								MemoryStorage: storage,
+								RaftMetadata:  &raftprotos.RaftMetadata{},
 							},
 							nil,
 							nil,
@@ -1100,7 +1100,7 @@ func newChain(timeout time.Duration, channel string, walDir string, applied uint
 		MaxInflightMsgs: 256,
 		RaftMetadata:    meta,
 		Logger:          flogging.NewFabricLogger(zap.NewNop()),
-		Storage:         storage,
+		MemoryStorage:   storage,
 		WALDir:          walDir,
 	}
 
@@ -1307,8 +1307,8 @@ func (n *network) elect(id uint64) (tick int) {
 				// in etcd/raft, if there's already a leader,
 				// lead in softstate goes through X -> 0 -> Y.
 				// therefore, we might observe 0 first. In this
-				// situation, no tick is needed because an
-				// leader election is underway.
+				// situation, no more tick is needed because an
+				// leader election is already underway.
 				Eventually(c.observe).Should(Receive(Equal(id)))
 			} else {
 				// if there's no leader (fresh cluster), we have 0 -> Y
