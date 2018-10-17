@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/pem"
+	"reflect"
 	"sync/atomic"
 
 	"github.com/hyperledger/fabric/common/channelconfig"
@@ -106,6 +107,31 @@ func NewTLSPinningDialer(config comm.ClientConfig) *PredicateDialer {
 	return d
 }
 
+// ClientConfig returns the comm.ClientConfig, or an error
+// if they cannot be extracted.
+func (dialer *PredicateDialer) ClientConfig() (comm.ClientConfig, error) {
+	val := dialer.Config.Load()
+	if val == nil {
+		return comm.ClientConfig{}, errors.New("client config not initialized")
+	}
+	if cc, isClientConfig := val.(comm.ClientConfig); !isClientConfig {
+		err := errors.Errorf("value stored is %v, not comm.ClientConfig",
+			reflect.TypeOf(val))
+		return comm.ClientConfig{}, err
+	} else {
+		if cc.SecOpts == nil {
+			return comm.ClientConfig{}, errors.New("SecOpts is nil")
+		}
+		// Copy by value the secure options
+		secOpts := *cc.SecOpts
+		return comm.ClientConfig{
+			Timeout: cc.Timeout,
+			SecOpts: &secOpts,
+			KaOpts:  cc.KaOpts,
+		}, nil
+	}
+}
+
 // SetConfig sets the configuration of the PredicateDialer
 func (dialer *PredicateDialer) SetConfig(config comm.ClientConfig) {
 	configCopy := comm.ClientConfig{
@@ -147,13 +173,13 @@ func DERtoPEM(der []byte) string {
 	}))
 }
 
-// StandardDialerDialer wraps a PredicateDialer
+// StandardDialer wraps a PredicateDialer
 // to a standard cluster.Dialer that passes in a nil verify function
-type StandardDialerDialer struct {
+type StandardDialer struct {
 	Dialer *PredicateDialer
 }
 
-func (bdp *StandardDialerDialer) Dial(address string) (*grpc.ClientConn, error) {
+func (bdp *StandardDialer) Dial(address string) (*grpc.ClientConn, error) {
 	return bdp.Dialer.Dial(address, nil)
 }
 
