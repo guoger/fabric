@@ -68,7 +68,7 @@ type Options struct {
 	HeartbeatTick   int
 	MaxSizePerMsg   uint64
 	MaxInflightMsgs int
-	Peers           []raft.Peer
+	RaftMetadata    *etcdraft.RaftMetadata
 }
 
 // Chain implements consensus.Chain interface.
@@ -148,7 +148,10 @@ func (c *Chain) Start() {
 		return
 	}
 
-	c.node = raft.StartNode(config, c.opts.Peers)
+	raftPeers := c.membershipToRaftPeers()
+
+	c.node = raft.StartNode(config, raftPeers)
+
 	close(c.startC)
 
 	go c.serveRaft()
@@ -371,12 +374,13 @@ func (c *Chain) serveRequest() {
 }
 
 func (c *Chain) writeBlock(b *common.Block) {
+	metadata := utils.MarshalOrPanic(c.opts.RaftMetadata)
 	if utils.IsConfigBlock(b) {
-		c.support.WriteConfigBlock(b, nil)
+		c.support.WriteConfigBlock(b, metadata)
 		return
 	}
 
-	c.support.WriteBlock(b, nil)
+	c.support.WriteBlock(b, metadata)
 }
 
 // Orders the envelope in the `msg` content. SubmitRequest.
@@ -425,10 +429,11 @@ func (c *Chain) commitBatches(batches ...[]*common.Envelope) error {
 
 		select {
 		case block := <-c.commitC:
+			membership := utils.MarshalOrPanic(c.opts.RaftMetadata)
 			if utils.IsConfigBlock(block) {
-				c.support.WriteConfigBlock(block, nil)
+				c.support.WriteConfigBlock(block, membership)
 			} else {
-				c.support.WriteBlock(block, nil)
+				c.support.WriteBlock(block, membership)
 			}
 
 		case <-c.resignC:
@@ -555,7 +560,7 @@ func (c *Chain) isConfig(env *common.Envelope) bool {
 }
 
 func (c *Chain) configureComm() error {
-	nodes, err := c.nodeConfigFromMetadata()
+	nodes, err := c.membershipToRemotePeers()
 	if err != nil {
 		return err
 	}
@@ -564,15 +569,9 @@ func (c *Chain) configureComm() error {
 	return nil
 }
 
-func (c *Chain) nodeConfigFromMetadata() ([]cluster.RemoteNode, error) {
+func (c *Chain) membershipToRemotePeers() ([]cluster.RemoteNode, error) {
 	var nodes []cluster.RemoteNode
-	m := &etcdraft.Metadata{}
-	if err := proto.Unmarshal(c.support.SharedConfig().ConsensusMetadata(), m); err != nil {
-		return nil, errors.Wrap(err, "failed to extract consensus metadata")
-	}
-
-	for id, consenter := range m.Consenters {
-		raftID := uint64(id + 1)
+	for raftID, consenter := range c.opts.RaftMetadata.Consenters {
 		// No need to know yourself
 		if raftID == c.raftID {
 			continue
@@ -615,33 +614,46 @@ func (c *Chain) checkConsentersSet(configValue *common.ConfigValue) error {
 		return errors.Wrap(err, "failed to unmarshal updated (new) etcdraft metadata configuration")
 	}
 
-	currentMetadata := &etcdraft.Metadata{}
-	if err := proto.Unmarshal(c.support.SharedConfig().ConsensusMetadata(), currentMetadata); err != nil {
-		return errors.Wrap(err, "failed to unmarshal current etcdraft metadata configuration")
-	}
-
-	if !c.consentersSetEqual(currentMetadata.Consenters, updatedMetadata.Consenters) {
+	if !c.consentersChanged(updatedMetadata.Consenters) {
 		return errors.New("update of consenters set is not supported yet")
 	}
 
 	return nil
 }
 
-func (c *Chain) consentersSetEqual(c1 []*etcdraft.Consenter, c2 []*etcdraft.Consenter) bool {
-	if len(c1) != len(c2) {
+func (c *Chain) consentersChanged(newConsenters []*etcdraft.Consenter) bool {
+	if len(c.opts.RaftMetadata.Consenters) != len(newConsenters) {
 		return false
 	}
 
-	consentersSet1 := c.consentersToMap(c1)
-	consentersSet2 := c.consentersToMap(c2)
+	consentersSet1 := c.membershipByCert()
+	consentersSet2 := c.consentersToMap(newConsenters)
 
 	return reflect.DeepEqual(consentersSet1, consentersSet2)
 }
 
-func (c *Chain) consentersToMap(c1 []*etcdraft.Consenter) map[string]*etcdraft.Consenter {
-	set := map[string]*etcdraft.Consenter{}
-	for _, c := range c1 {
-		set[string(c.ClientTlsCert)] = c
+func (c *Chain) membershipByCert() map[string]struct{} {
+	set := map[string]struct{}{}
+	for _, c := range c.opts.RaftMetadata.Consenters {
+		set[string(c.ClientTlsCert)] = struct{}{}
 	}
 	return set
+}
+
+func (c *Chain) consentersToMap(consenters []*etcdraft.Consenter) map[string]struct{} {
+	set := map[string]struct{}{}
+	for _, c := range consenters {
+		set[string(c.ClientTlsCert)] = struct{}{}
+	}
+	return set
+}
+
+func (c *Chain) membershipToRaftPeers() []raft.Peer {
+	var peers []raft.Peer
+
+	for raftID := range c.opts.RaftMetadata.Consenters {
+		peers = append(peers, raft.Peer{ID: raftID})
+	}
+	return peers
+
 }

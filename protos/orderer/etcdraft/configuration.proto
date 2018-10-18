@@ -35,3 +35,11 @@ message Options {
 	uint32 max_inflight_msgs = 4;
 	uint64 max_size_per_msg = 5;
 }
+
+// Maps of the Raft consenters membership to
+// cluster node ids to be stored in block metadata.
+// Keeps track on conseters ids and the next id
+message RaftMetadata {
+	map<uint64, Consenter> consenters = 1;
+	uint64 nextConsenterID = 2;
+}
