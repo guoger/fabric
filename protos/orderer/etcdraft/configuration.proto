@@ -42,4 +42,5 @@ message Options {
 message RaftMetadata {
 	map<uint64, Consenter> consenters = 1;
 	uint64 nextConsenterID = 2;
+	uint64 raftIndex = 3; // Index of etcd/raft entry this block is contained in
 }
