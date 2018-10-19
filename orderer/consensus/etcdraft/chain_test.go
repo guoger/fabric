@@ -72,7 +72,10 @@ var _ = Describe("Chain", func() {
 				Data:   []byte("TEST_MESSAGE"),
 			}),
 		}
-		normalBlock = &common.Block{Data: &common.BlockData{Data: [][]byte{[]byte("foo")}}}
+		normalBlock = &common.Block{
+			Header: &common.BlockHeader{},
+			Data:   &common.BlockData{Data: [][]byte{[]byte("foo")}},
+		}
 	})
 
 	Describe("Single Raft node", func() {
@@ -86,18 +89,23 @@ var _ = Describe("Chain", func() {
 			storage           *raft.MemoryStorage
 			observeC          chan uint64
 			chain             *etcdraft.Chain
+			dataDir           string
 			walDir            string
+			snapDir           string
+			err               error
 		)
 
 		BeforeEach(func() {
-			var err error
-
 			configurator = &mocks.Configurator{}
 			configurator.On("Configure", mock.Anything, mock.Anything)
 			clock = fakeclock.NewFakeClock(time.Now())
 			storage = raft.NewMemoryStorage()
-			walDir, err = ioutil.TempDir("", "wal-")
+
+			dataDir, err = ioutil.TempDir("", "wal-")
 			Expect(err).NotTo(HaveOccurred())
+			walDir = path.Join(dataDir, "wal")
+			snapDir = path.Join(dataDir, "snapshot")
+
 			observeC = make(chan uint64, 1)
 
 			support = &consensusmocks.FakeConsenterSupport{}
@@ -110,14 +118,14 @@ var _ = Describe("Chain", func() {
 			cutter = mockblockcutter.NewReceiver()
 			support.BlockCutterReturns(cutter)
 
-			membership := &raftprotos.RaftMetadata{
+			meta := &raftprotos.RaftMetadata{
 				Consenters:      map[uint64]*raftprotos.Consenter{},
 				NextConsenterID: 1,
 			}
 
 			for _, c := range consenterMetadata.Consenters {
-				membership.Consenters[membership.NextConsenterID] = c
-				membership.NextConsenterID++
+				meta.Consenters[meta.NextConsenterID] = c
+				meta.NextConsenterID++
 			}
 
 			opts = etcdraft.Options{
@@ -128,14 +136,12 @@ var _ = Describe("Chain", func() {
 				HeartbeatTick:   HEARTBEAT_TICK,
 				MaxSizePerMsg:   1024 * 1024,
 				MaxInflightMsgs: 256,
-				RaftMetadata:    membership,
+				RaftMetadata:    meta,
 				Logger:          logger,
 				MemoryStorage:   storage,
 				WALDir:          walDir,
+				SnapDir:         snapDir,
 			}
-
-			chain, err = etcdraft.NewChain(support, opts, configurator, nil, observeC)
-			Expect(err).NotTo(HaveOccurred())
 		})
 
 		campaign := func() {
@@ -151,6 +157,9 @@ var _ = Describe("Chain", func() {
 		}
 
 		JustBeforeEach(func() {
+			chain, err = etcdraft.NewChain(support, opts, configurator, nil, observeC)
+			Expect(err).NotTo(HaveOccurred())
+
 			chain.Start()
 
 			// When the Raft node bootstraps, it produces a ConfChange
@@ -173,7 +182,7 @@ var _ = Describe("Chain", func() {
 
 		AfterEach(func() {
 			chain.Halt()
-			os.RemoveAll(walDir)
+			os.RemoveAll(dataDir)
 		})
 
 		Context("when a node starts up", func() {
@@ -401,6 +410,7 @@ var _ = Describe("Chain", func() {
 				// ensures that configBlock has the correct configEnv
 				JustBeforeEach(func() {
 					configBlock = &common.Block{
+						Header: &common.BlockHeader{},
 						Data: &common.BlockData{
 							Data: [][]byte{marshalOrPanic(configEnv)},
 						},
@@ -575,16 +585,9 @@ var _ = Describe("Chain", func() {
 			Describe("Crash Fault Tolerance", func() {
 				Describe("when a chain is started with existing WAL", func() {
 					var (
-						m1      *raftprotos.RaftMetadata
-						m2      *raftprotos.RaftMetadata
-						newOpts etcdraft.Options
+						m1 *raftprotos.RaftMetadata
+						m2 *raftprotos.RaftMetadata
 					)
-
-					BeforeEach(func() {
-						newOpts = opts                                  // make a copy of Options
-						newOpts.MemoryStorage = raft.NewMemoryStorage() // create a fresh MemoryStorage
-					})
-
 					JustBeforeEach(func() {
 						// to generate WAL data, we start a chain,
 						// order several envelopes and then halt the chain.
@@ -613,7 +616,8 @@ var _ = Describe("Chain", func() {
 					})
 
 					It("replays blocks from committed entries", func() {
-						c := newChain(10*time.Second, channelID, walDir, 0, 1, []uint64{1})
+						c := newChain(10*time.Second, channelID, dataDir, 0, 1, []uint64{1})
+						c.init()
 						c.Start()
 						defer c.Halt()
 
@@ -631,7 +635,8 @@ var _ = Describe("Chain", func() {
 					})
 
 					It("only replays blocks after Applied index", func() {
-						c := newChain(10*time.Second, channelID, walDir, m1.RaftIndex, 1, []uint64{1})
+						c := newChain(10*time.Second, channelID, dataDir, m1.RaftIndex, 1, []uint64{1})
+						c.init()
 						c.Start()
 						defer c.Halt()
 
@@ -644,7 +649,8 @@ var _ = Describe("Chain", func() {
 					})
 
 					It("does not replay any block if already in sync", func() {
-						c := newChain(10*time.Second, channelID, walDir, m2.RaftIndex, 1, []uint64{1})
+						c := newChain(10*time.Second, channelID, dataDir, m2.RaftIndex, 1, []uint64{1})
+						c.init()
 						c.Start()
 						defer c.Halt()
 
@@ -667,6 +673,148 @@ var _ = Describe("Chain", func() {
 						})
 					})
 				})
+
+				Describe("when snapshotting is enabled (snapshot interval is not zero)", func() {
+					var (
+						m *raftprotos.RaftMetadata
+					)
+
+					countFiles := func() int {
+						files, err := ioutil.ReadDir(snapDir)
+						Expect(err).NotTo(HaveOccurred())
+						return len(files)
+					}
+
+					BeforeEach(func() {
+						opts.SnapInterval = 2
+						opts.SnapshotCatchUpEntries = 1
+
+						close(cutter.Block)
+						cutter.CutNext = true
+						support.CreateNextBlockReturns(normalBlock)
+					})
+
+					JustBeforeEach(func() {
+						err = chain.Order(env, uint64(0))
+						Expect(err).NotTo(HaveOccurred())
+						Eventually(support.WriteBlockCallCount).Should(Equal(1))
+
+						normalBlock.Header.Number++
+						err = chain.Order(env, uint64(0))
+						Expect(err).NotTo(HaveOccurred())
+						Eventually(support.WriteBlockCallCount).Should(Equal(2))
+
+						normalBlock.Header.Number++
+						err = chain.Order(env, uint64(0))
+						Expect(err).NotTo(HaveOccurred())
+						Eventually(support.WriteBlockCallCount).Should(Equal(3))
+
+						_, metadata := support.WriteBlockArgsForCall(2)
+						m = &raftprotos.RaftMetadata{}
+						proto.Unmarshal(metadata, m)
+					})
+
+					It("writes snapshot file to snapDir", func() {
+						// Scenario: start a chain with SnapInterval = 1, expect it to take
+						// one snapshot after ordering 3 blocks.
+						//
+						// block number starts from 0, and we determine if snapshot should be taken by:
+						//        appliedBlockNum - snapBlockNum < SnapInterval
+
+						Eventually(countFiles).Should(Equal(1))
+						Eventually(opts.MemoryStorage.FirstIndex).Should(BeNumerically(">", 1))
+
+						// chain should still be functioning
+						normalBlock.Header.Number++
+						err = chain.Order(env, uint64(0))
+						Expect(err).NotTo(HaveOccurred())
+						Eventually(support.WriteBlockCallCount).Should(Equal(4))
+					})
+
+					It("restores snapshot w/o extra entries", func() {
+						// Scenario:
+						// after a snapshot is taken, no more entries are appended.
+						// then node is restarted, it loads snapshot, finds its term
+						// and index. While replaying WAL to memory storage, it should
+						// not append any entry because no extra entry was appended
+						// after snapshot was taken.
+
+						Eventually(countFiles).Should(Equal(1))
+						Eventually(opts.MemoryStorage.FirstIndex).Should(BeNumerically(">", 1))
+						i, _ := opts.MemoryStorage.FirstIndex()
+						chain.Halt()
+
+						c := newChain(10*time.Second, channelID, dataDir, m.RaftIndex, 1, []uint64{1})
+						c.init()
+						c.Start()
+						defer c.Halt()
+
+						Eventually(c.opts.MemoryStorage.FirstIndex).Should(Equal(i + opts.SnapshotCatchUpEntries))
+						Eventually(c.opts.MemoryStorage.LastIndex).Should(Equal(i))
+
+						Eventually(func() bool {
+							c.clock.Increment(interval)
+							select {
+							case <-c.observe:
+								return true
+							default:
+								return false
+							}
+						}).Should(BeTrue())
+
+						c.cutter.CutNext = true
+						normalBlock.Header.Number++
+						err = c.Order(env, uint64(0))
+						Expect(err).NotTo(HaveOccurred())
+						Eventually(c.support.WriteBlockCallCount).Should(Equal(1))
+					})
+
+					It("restores snapshot w/ extra entries", func() {
+						// Scenario:
+						// after a snapshot is taken, more entries are appended.
+						// then node is restarted, it loads snapshot, finds its term
+						// and index. While replaying WAL to memory storage, it should
+						// append some entries.
+
+						// check snapshot does exit
+						Eventually(countFiles).Should(Equal(1))
+						Eventually(opts.MemoryStorage.FirstIndex).Should(BeNumerically(">", 1))
+						snapi, _ := opts.MemoryStorage.FirstIndex()
+
+						normalBlock.Header.Number++
+						err = chain.Order(env, uint64(0))
+						Expect(err).NotTo(HaveOccurred())
+						Eventually(support.WriteBlockCallCount).Should(Equal(4))
+
+						lasti, _ := opts.MemoryStorage.LastIndex()
+
+						chain.Halt()
+
+						c := newChain(10*time.Second, channelID, dataDir, m.RaftIndex, 1, []uint64{1})
+						c.init()
+						c.Start()
+						defer c.Halt()
+
+						Eventually(c.opts.MemoryStorage.FirstIndex).Should(Equal(snapi + opts.SnapshotCatchUpEntries))
+						Eventually(c.opts.MemoryStorage.LastIndex).Should(Equal(lasti))
+
+						Eventually(func() bool {
+							c.clock.Increment(interval)
+							select {
+							case <-c.observe:
+								return true
+							default:
+								return false
+							}
+						}).Should(BeTrue())
+
+						c.cutter.CutNext = true
+						normalBlock.Header.Number++
+						err = c.Order(env, uint64(0))
+						Expect(err).NotTo(HaveOccurred())
+						Eventually(c.support.WriteBlockCallCount).Should(Equal(2))
+					})
+				})
 			})
 
 			Context("Invalid WAL dir", func() {
@@ -682,6 +830,7 @@ var _ = Describe("Chain", func() {
 							support,
 							etcdraft.Options{
 								WALDir:        f.Name(),
+								SnapDir:       snapDir,
 								Logger:        logger,
 								MemoryStorage: storage,
 								RaftMetadata:  &raftprotos.RaftMetadata{},
@@ -711,6 +860,7 @@ var _ = Describe("Chain", func() {
 							support,
 							etcdraft.Options{
 								WALDir:        d,
+								SnapDir:       snapDir,
 								Logger:        logger,
 								MemoryStorage: storage,
 								RaftMetadata:  &raftprotos.RaftMetadata{},
@@ -738,6 +888,7 @@ var _ = Describe("Chain", func() {
 							support,
 							etcdraft.Options{
 								WALDir:       path.Join(d, "wal-dir"),
+								SnapDir:      snapDir,
 								Logger:       logger,
 								RaftMetadata: &raftprotos.RaftMetadata{},
 							},
@@ -783,6 +934,7 @@ var _ = Describe("Chain", func() {
 
 		When("2/3 nodes are running", func() {
 			It("late node can catch up", func() {
+				network.init()
 				network.start(1, 2)
 				network.elect(1)
 
@@ -801,10 +953,46 @@ var _ = Describe("Chain", func() {
 
 				network.stop()
 			})
+
+			It("late node receives snapshot from leader", func() {
+				Skip("not implemented")
+				c1.opts.SnapInterval = 1
+				c1.opts.SnapshotCatchUpEntries = 1
+
+				c1.cutter.CutNext = true
+				c1.support.CreateNextBlockReturns(normalBlock)
+
+				network.init()
+				network.start(1, 2)
+				network.elect(1)
+
+				err := c1.Order(env, 0)
+				Expect(err).ToNot(HaveOccurred())
+
+				Eventually(func() int { return c1.support.WriteBlockCallCount() }).Should(Equal(1))
+				Eventually(func() int { return c2.support.WriteBlockCallCount() }).Should(Equal(1))
+				Eventually(func() int { return c3.support.WriteBlockCallCount() }).Should(Equal(0))
+
+				normalBlock.Header.Number++
+				err = c1.Order(env, 0)
+				Expect(err).ToNot(HaveOccurred())
+
+				Eventually(func() int { return c1.support.WriteBlockCallCount() }).Should(Equal(2))
+				Eventually(func() int { return c2.support.WriteBlockCallCount() }).Should(Equal(2))
+				Eventually(func() int { return c3.support.WriteBlockCallCount() }).Should(Equal(0))
+
+				network.start(3)
+
+				c1.clock.Increment(interval)
+				Eventually(func() int { return c3.support.WriteBlockCallCount() }).Should(Equal(1))
+
+				network.stop()
+			})
 		})
 
 		When("3/3 nodes are running", func() {
 			JustBeforeEach(func() {
+				network.init()
 				network.start()
 				network.elect(1)
 			})
@@ -863,6 +1051,59 @@ var _ = Describe("Chain", func() {
 					func(c *chain) {
 						Eventually(func() int { return c.support.WriteBlockCallCount() }).Should(Equal(2))
 					})
+			})
+
+			When("Snapshotting is enabled", func() {
+				BeforeEach(func() {
+					c1.opts.SnapInterval = 1
+					c1.opts.SnapshotCatchUpEntries = 1
+				})
+
+				It("keeps running if some entries in memory are purged", func() {
+					// Scenario: snapshotting is enabled on node 1 and it purges memory storage
+					// per every snapshot. Cluster should be correctly functioning.
+
+					i, err := c1.opts.MemoryStorage.FirstIndex()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(i).To(Equal(uint64(1)))
+
+					c1.cutter.CutNext = true
+					c1.support.CreateNextBlockReturns(normalBlock)
+
+					err = c1.Order(env, 0)
+					Expect(err).ToNot(HaveOccurred())
+
+					network.exec(
+						func(c *chain) {
+							Eventually(func() int { return c.support.WriteBlockCallCount() }).Should(Equal(1))
+						})
+
+					Eventually(c1.opts.MemoryStorage.FirstIndex).Should(Equal(i))
+
+					normalBlock.Header.Number++
+					err = c1.Order(env, 0)
+					Expect(err).ToNot(HaveOccurred())
+
+					network.exec(
+						func(c *chain) {
+							Eventually(func() int { return c.support.WriteBlockCallCount() }).Should(Equal(2))
+						})
+
+					Eventually(c1.opts.MemoryStorage.FirstIndex).Should(BeNumerically(">", i))
+					i, err = c1.opts.MemoryStorage.FirstIndex()
+					Expect(err).NotTo(HaveOccurred())
+
+					normalBlock.Header.Number++
+					err = c1.Order(env, 0)
+					Expect(err).ToNot(HaveOccurred())
+
+					network.exec(
+						func(c *chain) {
+							Eventually(func() int { return c.support.WriteBlockCallCount() }).Should(Equal(3))
+						})
+
+					Eventually(c1.opts.MemoryStorage.FirstIndex).Should(BeNumerically(">", i))
+				})
 			})
 
 			Context("failover", func() {
@@ -1058,6 +1299,7 @@ type chain struct {
 	storage      *raft.MemoryStorage
 	walDir       string
 	clock        *fakeclock.FakeClock
+	opts         etcdraft.Options
 
 	observe   chan uint64
 	unstarted chan struct{}
@@ -1065,7 +1307,7 @@ type chain struct {
 	*etcdraft.Chain
 }
 
-func newChain(timeout time.Duration, channel string, walDir string, applied uint64, id uint64, all []uint64) *chain {
+func newChain(timeout time.Duration, channel string, dataDir string, applied uint64, id uint64, all []uint64) *chain {
 	rpc := &mocks.FakeRPC{}
 	clock := fakeclock.NewFakeClock(time.Now())
 	storage := raft.NewMemoryStorage()
@@ -1101,12 +1343,18 @@ func newChain(timeout time.Duration, channel string, walDir string, applied uint
 		RaftMetadata:    meta,
 		Logger:          flogging.NewFabricLogger(zap.NewNop()),
 		MemoryStorage:   storage,
-		WALDir:          walDir,
+		WALDir:          path.Join(dataDir, "wal"),
+		SnapDir:         path.Join(dataDir, "snapshot"),
 	}
 
 	support := &consensusmocks.FakeConsenterSupport{}
 	support.ChainIDReturns(channel)
-	support.CreateNextBlockReturns(&common.Block{Data: &common.BlockData{Data: [][]byte{[]byte("foo")}}})
+	support.CreateNextBlockReturns(
+		&common.Block{
+			Header: &common.BlockHeader{},
+			Data:   &common.BlockData{Data: [][]byte{[]byte("foo")}},
+		},
+	)
 	support.SharedConfigReturns(&mockconfig.Orderer{BatchTimeoutVal: timeout})
 
 	cutter := mockblockcutter.NewReceiver()
@@ -1121,22 +1369,26 @@ func newChain(timeout time.Duration, channel string, walDir string, applied uint
 	configurator := &mocks.Configurator{}
 	configurator.On("Configure", mock.Anything, mock.Anything)
 
-	c, err := etcdraft.NewChain(support, opts, configurator, rpc, observe)
-	Expect(err).NotTo(HaveOccurred())
-
 	ch := make(chan struct{})
 	close(ch)
 	return &chain{
-		id:        id,
-		support:   support,
-		cutter:    cutter,
-		rpc:       rpc,
-		storage:   storage,
-		observe:   observe,
-		clock:     clock,
-		unstarted: ch,
-		Chain:     c,
+		id:           id,
+		support:      support,
+		cutter:       cutter,
+		rpc:          rpc,
+		storage:      storage,
+		observe:      observe,
+		clock:        clock,
+		opts:         opts,
+		unstarted:    ch,
+		configurator: configurator,
 	}
+}
+
+func (c *chain) init() {
+	ch, err := etcdraft.NewChain(c.support, c.opts, c.configurator, c.rpc, c.observe)
+	Expect(err).NotTo(HaveOccurred())
+	c.Chain = ch
 }
 
 type network struct {
@@ -1197,6 +1449,10 @@ func createNetwork(timeout time.Duration, channel string, dataDir string, ids []
 	}
 
 	return n
+}
+
+func (n *network) init() {
+	n.exec(func(c *chain) { c.init() })
 }
 
 func (n *network) start(ids ...uint64) {

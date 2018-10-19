@@ -29,6 +29,8 @@ import (
 	"github.com/pkg/errors"
 )
 
+const DefaultSnapshotCatchUpEntries = uint64(500)
+
 //go:generate mockery -dir . -name Configurator -case underscore -output ./mocks/
 
 // Configurator is used to configure the communication layer
@@ -60,7 +62,17 @@ type Options struct {
 
 	Clock clock.Clock
 
-	WALDir        string
+	WALDir       string
+	SnapDir      string
+	SnapInterval uint64
+
+	// SnapshotCatchUpEntries is the number of entries kept in memory
+	// for a slow follower to catch-up after compacting the raft storage entries.
+	//
+	// This is configurable mainly for testing purpose. Users are not
+	// expected to be able to configure this
+	SnapshotCatchUpEntries uint64
+
 	MemoryStorage MemoryStorage
 	Logger        *flogging.FabricLogger
 
@@ -96,6 +108,12 @@ type Chain struct {
 	leader       uint64
 	appliedIndex uint64
 
+	lastSnapBlockNum    uint64
+	lastAppliedBlockNum uint64
+	lastAppliedBlock    block
+
+	confState raftpb.ConfState
+
 	hasWAL bool // indicate if this is a fresh raft node
 
 	node    raft.Node
@@ -116,9 +134,15 @@ func NewChain(
 	lg := opts.Logger.With("channel", support.ChainID(), "node", opts.RaftID)
 
 	applied := opts.RaftMetadata.RaftIndex
-	storage, hasWAL, err := Restore(lg, applied, opts.WALDir, opts.MemoryStorage)
+	storage, hasWAL, err := Restore(lg, applied, opts.WALDir, opts.SnapDir, opts.MemoryStorage)
 	if err != nil {
 		return nil, errors.Errorf("failed to restore persited raft data: %s", err)
+	}
+
+	if opts.SnapshotCatchUpEntries == 0 {
+		storage.SnapshotCatchUpEntries = DefaultSnapshotCatchUpEntries
+	} else {
+		storage.SnapshotCatchUpEntries = opts.SnapshotCatchUpEntries
 	}
 
 	return &Chain{
@@ -481,6 +505,9 @@ func (c *Chain) serveRaft() {
 
 			c.apply(c.entriesToApply(rd.CommittedEntries))
 			c.node.Advance()
+
+			// TODO(jay_guo) leader can write to disk in parallel with replicating
+			// to the followers and them writing to their disks. Check 10.2.1 in thesis
 			c.send(rd.Messages)
 
 			if rd.SoftState != nil {
@@ -502,6 +529,8 @@ func (c *Chain) serveRaft() {
 				}
 			}
 
+			c.maybeSnap()
+
 		case <-c.haltC:
 			ticker.Stop()
 			c.node.Stop()
@@ -521,7 +550,11 @@ func (c *Chain) apply(ents []raftpb.Entry) {
 				break
 			}
 
-			c.commitC <- block{utils.UnmarshalBlockOrPanic(ents[i].Data), ents[i].Index}
+			b := block{utils.UnmarshalBlockOrPanic(ents[i].Data), ents[i].Index}
+			c.commitC <- b
+
+			c.lastAppliedBlock = b
+			c.lastAppliedBlockNum = b.b.Header.Number
 
 		case raftpb.EntryConfChange:
 			var cc raftpb.ConfChange
@@ -530,11 +563,30 @@ func (c *Chain) apply(ents []raftpb.Entry) {
 				continue
 			}
 
-			c.node.ApplyConfChange(cc)
+			c.confState = *c.node.ApplyConfChange(cc)
 		}
 
 		c.appliedIndex = ents[i].Index
 	}
+}
+
+func (c *Chain) maybeSnap() {
+	if c.opts.SnapInterval == 0 {
+		// SnapInterval is not set, never taking snapshot
+		return
+	}
+
+	if c.lastAppliedBlockNum-c.lastSnapBlockNum < c.opts.SnapInterval {
+		// not enough blocks accumulated, no snapshot needed
+		return
+	}
+
+	c.logger.Infof("Taking snapshot at block %d, last snapshotted block number is %d", c.lastAppliedBlockNum, c.lastSnapBlockNum)
+	if err := c.storage.TakeSnapshot(c.appliedIndex, &c.confState, utils.MarshalOrPanic(c.lastAppliedBlock.b)); err != nil {
+		c.logger.Fatalf("Failed to create snapshot at index %d", c.appliedIndex)
+	}
+
+	c.lastSnapBlockNum = c.lastAppliedBlockNum
 }
 
 func (c *Chain) send(msgs []raftpb.Message) {
