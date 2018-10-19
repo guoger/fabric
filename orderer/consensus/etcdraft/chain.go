@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/pem"
 	"fmt"
+	"os"
 	"reflect"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,8 @@ import (
 	"code.cloudfoundry.org/clock"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/coreos/etcd/wal"
+	"github.com/coreos/etcd/wal/walpb"
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/common/configtx"
 	"github.com/hyperledger/fabric/common/flogging"
@@ -36,6 +39,7 @@ import (
 type Storage interface {
 	raft.Storage
 	Append(entries []raftpb.Entry) error
+	SetHardState(st raftpb.HardState) error
 }
 
 //go:generate mockery -dir . -name Configurator -case underscore -output ./mocks/
@@ -54,12 +58,22 @@ type RPC interface {
 	SendSubmit(dest uint64, request *orderer.SubmitRequest) error
 }
 
+type block struct {
+	b *common.Block
+
+	// i is the etcd/raft entry Index associated with block.
+	// it is persisted as block metatdata so we know where
+	// to continue rafting upon reboot.
+	i uint64
+}
+
 // Options contains all the configurations relevant to the chain.
 type Options struct {
 	RaftID uint64
 
 	Clock clock.Clock
 
+	WALDir  string
 	Storage Storage
 	Logger  *flogging.FabricLogger
 
@@ -68,7 +82,8 @@ type Options struct {
 	HeartbeatTick   int
 	MaxSizePerMsg   uint64
 	MaxInflightMsgs int
-	RaftMetadata    *etcdraft.RaftMetadata
+
+	RaftMetadata *etcdraft.RaftMetadata
 }
 
 // Chain implements consensus.Chain interface.
@@ -80,7 +95,7 @@ type Chain struct {
 	channelID string
 
 	submitC  chan *orderer.SubmitRequest
-	commitC  chan *common.Block
+	commitC  chan block
 	observeC chan<- uint64 // Notifies external observer on leader change (passed in optionally as an argument for tests)
 	haltC    chan struct{} // Signals to goroutines that the chain is halting
 	doneC    chan struct{} // Closes when the chain halts
@@ -94,8 +109,11 @@ type Chain struct {
 	leader       uint64
 	appliedIndex uint64
 
+	hasWAL bool // indicate if this is a fresh raft node
+
 	node    raft.Node
 	storage Storage
+	wal     *wal.WAL
 	opts    Options
 
 	logger *flogging.FabricLogger
@@ -108,22 +126,34 @@ func NewChain(
 	conf Configurator,
 	rpc RPC,
 	observeC chan<- uint64) (*Chain, error) {
+
+	lg := opts.Logger.With("channel", support.ChainID(), "node", opts.RaftID)
+
+	applied := opts.RaftMetadata.RaftIndex
+	w, hasWAL, err := replayWAL(lg, applied, opts.WALDir, opts.Storage)
+	if err != nil {
+		return nil, errors.Errorf("failed to create chain: %s", err)
+	}
+
 	return &Chain{
 		configurator: conf,
 		rpc:          rpc,
 		channelID:    support.ChainID(),
 		raftID:       opts.RaftID,
 		submitC:      make(chan *orderer.SubmitRequest),
-		commitC:      make(chan *common.Block),
+		commitC:      make(chan block),
 		haltC:        make(chan struct{}),
 		doneC:        make(chan struct{}),
 		resignC:      make(chan struct{}),
 		startC:       make(chan struct{}),
 		observeC:     observeC,
 		support:      support,
+		hasWAL:       hasWAL,
+		appliedIndex: applied,
 		clock:        opts.Clock,
-		logger:       opts.Logger.With("channel", support.ChainID(), "node", opts.RaftID),
+		logger:       lg,
 		storage:      opts.Storage,
+		wal:          w,
 		opts:         opts,
 	}, nil
 }
@@ -139,6 +169,7 @@ func (c *Chain) Start() {
 		MaxInflightMsgs:           c.opts.MaxInflightMsgs,
 		Logger:                    c.logger,
 		Storage:                   c.opts.Storage,
+		Applied:                   c.appliedIndex,
 		DisableProposalForwarding: true, // This prevents blocks from being accidentally proposed by followers
 	}
 
@@ -150,7 +181,13 @@ func (c *Chain) Start() {
 
 	raftPeers := c.membershipToRaftPeers()
 
-	c.node = raft.StartNode(config, raftPeers)
+	if !c.hasWAL {
+		c.logger.Infof("starting new raft node %d", c.raftID)
+		c.node = raft.StartNode(config, raftPeers)
+	} else {
+		c.logger.Infof("restarting raft node %d", c.raftID)
+		c.node = raft.RestartNode(config)
+	}
 
 	close(c.startC)
 
@@ -373,14 +410,16 @@ func (c *Chain) serveRequest() {
 	}
 }
 
-func (c *Chain) writeBlock(b *common.Block) {
-	metadata := utils.MarshalOrPanic(c.opts.RaftMetadata)
-	if utils.IsConfigBlock(b) {
-		c.support.WriteConfigBlock(b, metadata)
+func (c *Chain) writeBlock(b block) {
+	c.opts.RaftMetadata.RaftIndex = b.i
+	m := utils.MarshalOrPanic(c.opts.RaftMetadata)
+
+	if utils.IsConfigBlock(b.b) {
+		c.support.WriteConfigBlock(b.b, m)
 		return
 	}
 
-	c.support.WriteBlock(b, metadata)
+	c.support.WriteBlock(b.b, m)
 }
 
 // Orders the envelope in the `msg` content. SubmitRequest.
@@ -429,12 +468,7 @@ func (c *Chain) commitBatches(batches ...[]*common.Envelope) error {
 
 		select {
 		case block := <-c.commitC:
-			membership := utils.MarshalOrPanic(c.opts.RaftMetadata)
-			if utils.IsConfigBlock(block) {
-				c.support.WriteConfigBlock(block, membership)
-			} else {
-				c.support.WriteBlock(block, membership)
-			}
+			c.writeBlock(block)
 
 		case <-c.resignC:
 			return errors.Errorf("aborted block committing: lost leadership")
@@ -457,6 +491,9 @@ func (c *Chain) serveRaft() {
 
 		case rd := <-c.node.Ready():
 			c.storage.Append(rd.Entries)
+			if err := c.wal.Save(rd.HardState, rd.Entries); err != nil {
+				c.logger.Panicf("failed to persist hardstate and entries to wal: %s", err)
+			}
 			c.apply(c.entriesToApply(rd.CommittedEntries))
 			c.node.Advance()
 			c.send(rd.Messages)
@@ -481,10 +518,11 @@ func (c *Chain) serveRaft() {
 			}
 
 		case <-c.haltC:
-			close(c.doneC)
 			ticker.Stop()
 			c.node.Stop()
+			c.wal.Close()
 			c.logger.Infof("Raft node %x stopped", c.raftID)
+			close(c.doneC) // close after all the artifacts are closed
 			return
 		}
 	}
@@ -498,7 +536,7 @@ func (c *Chain) apply(ents []raftpb.Entry) {
 				break
 			}
 
-			c.commitC <- utils.UnmarshalBlockOrPanic(ents[i].Data)
+			c.commitC <- block{utils.UnmarshalBlockOrPanic(ents[i].Data), ents[i].Index}
 
 		case raftpb.EntryConfChange:
 			var cc raftpb.ConfChange
@@ -540,7 +578,7 @@ func (c *Chain) entriesToApply(ents []raftpb.Entry) (nents []raftpb.Entry) {
 		c.logger.Panicf("first index of committed entry[%d] should <= progress.appliedIndex[%d]+1", firstIdx, c.appliedIndex)
 	}
 
-	// If we do have unapplied entries in nents.
+	// If we do have unapplied entries in ents.
 	//    |     applied    |       unapplied      |
 	//    |----------------|----------------------|
 	// firstIdx       appliedIndex              last
@@ -655,5 +693,53 @@ func (c *Chain) membershipToRaftPeers() []raft.Peer {
 		peers = append(peers, raft.Peer{ID: raftID})
 	}
 	return peers
+}
 
+func replayWAL(lg *flogging.FabricLogger, applied uint64, walDir string, storage Storage) (*wal.WAL, bool, error) {
+	hasWAL := wal.Exist(walDir)
+	if !hasWAL && applied != 0 {
+		return nil, hasWAL, errors.Errorf("applied index is not zero but no WAL data found")
+	}
+
+	if !hasWAL {
+		// wal.Create takes care of following cases by creating temp dir and atomically rename it:
+		// - wal dir is a file
+		// - wal dir is not readable/writeable
+		//
+		// TODO(jay_guo) store channel-related information in metadata when needed.
+		// potential use case could be data dump and restore
+		lg.Infof("No WAL data found, creating new WAL at path '%s'", walDir)
+		w, err := wal.Create(walDir, nil)
+		if err == os.ErrExist {
+			lg.Fatalf("programming error, we've just checked that WAL does not exist")
+		}
+
+		if err != nil {
+			return nil, hasWAL, errors.Errorf("failed to initialize WAL: %s", err)
+		}
+
+		if err = w.Close(); err != nil {
+			return nil, hasWAL, errors.Errorf("failed to close the WAL just created: %s", err)
+		}
+	} else {
+		lg.Infof("Found WAL data at path '%s', replaying it", walDir)
+	}
+
+	w, err := wal.Open(walDir, walpb.Snapshot{})
+	if err != nil {
+		return nil, hasWAL, errors.Errorf("failed to open existing WAL: %s", err)
+	}
+
+	_, st, ents, err := w.ReadAll()
+	if err != nil {
+		return nil, hasWAL, errors.Errorf("failed to read WAL: %s", err)
+	}
+
+	lg.Debugf("Setting HardState to {Term: %d, Commit: %d}", st.Term, st.Commit)
+	storage.SetHardState(st) // MemoryStorage.SetHardState always returns nil
+
+	lg.Debugf("Appending %d entries to memory storage", len(ents))
+	storage.Append(ents) // MemoryStorage.Append always return nil
+
+	return w, hasWAL, nil
 }
