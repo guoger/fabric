@@ -304,3 +304,16 @@ Debug:
     # DeliverTraceDir when set will cause each request to the Deliver service
     # for this orderer to be written to a file in this directory
     DeliverTraceDir:
+
+################################################################################
+#
+#   Consensus Configuration
+#
+#   - This section contains config options for a consensus plugin. It is opaque
+#     to orderer, and completely up to consensus implementation to make use of.
+#
+################################################################################
+Consensus:
+  Foo: bar
+  Hello:
+    World: 42
