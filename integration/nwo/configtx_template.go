@@ -76,7 +76,7 @@ Profiles:{{ range .Profiles }}
       {{- end }}{{ end }}
       BatchTimeout: 1s
       BatchSize:
-        MaxMessageCount: 1
+        MaxMessageCount: {{ if .BatchSize.MaxMessageCount }}{{ .BatchSize.MaxMessageCount }}{{ else }}1{{ end }}
         AbsoluteMaxBytes: 98 MB
         PreferredMaxBytes: 512 KB
       Capabilities:
@@ -90,7 +90,7 @@ Profiles:{{ range .Profiles }}
       {{- if eq $w.Consensus.Type "etcdraft" }}
       EtcdRaft:
         Options:
-          SnapshotInterval: 5
+          SnapshotInterval: {{ if .SnapshotInterval }}{{ .SnapshotInterval }}{{ else }}5{{ end }}
         Consenters:{{ range .Orderers }}{{ with $w.Orderer . }}
         - Host: 127.0.0.1
           Port: {{ $w.OrdererPort . "Listen" }}

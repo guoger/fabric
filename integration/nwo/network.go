@@ -77,6 +77,11 @@ type Channel struct {
 	Profile string `yaml:"profile,omitempty"`
 }
 
+// BatchSize declares default batchsize of channels
+type BatchSize struct {
+	MaxMessageCount int `yaml:"max_message_count,omitempty"`
+}
+
 // Orderer defines an orderer instance and its owning organization.
 type Orderer struct {
 	Name         string `yaml:"name,omitempty"`
@@ -120,10 +125,12 @@ func (p *Peer) Anchor() bool {
 
 // A profile encapsulates basic information for a configtxgen profile.
 type Profile struct {
-	Name          string   `yaml:"name,omitempty"`
-	Orderers      []string `yaml:"orderers,omitempty"`
-	Consortium    string   `yaml:"consortium,omitempty"`
-	Organizations []string `yaml:"organizations,omitempty"`
+	Name             string    `yaml:"name,omitempty"`
+	Orderers         []string  `yaml:"orderers,omitempty"`
+	Consortium       string    `yaml:"consortium,omitempty"`
+	Organizations    []string  `yaml:"organizations,omitempty"`
+	BatchSize        BatchSize `yaml:"batch_size,omitempty"`
+	SnapshotInterval int       `yaml:"snapshot_interval,omitempty"`
 }
 
 // Network holds information about a fabric network.
