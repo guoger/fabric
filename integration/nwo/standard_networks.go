@@ -6,6 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 
 package nwo
 
+import (
+	"fmt"
+)
+
 func BasicSolo() *Config {
 	return &Config{
 		Organizations: []*Organization{{
@@ -135,12 +139,14 @@ func MultiChannelEtcdRaft() *Config {
 	return config
 }
 
-func MultiNodeEtcdRaft() *Config {
+func MultiNodeEtcdRaft(size int) *Config {
 	config := BasicEtcdRaft()
-	config.Orderers = []*Orderer{
-		{Name: "orderer1", Organization: "OrdererOrg"},
-		{Name: "orderer2", Organization: "OrdererOrg"},
-		{Name: "orderer3", Organization: "OrdererOrg"},
+	orderers := []string{}
+	config.Orderers = make([]*Orderer, size)
+	for i := 0; i < size; i++ {
+		o := fmt.Sprintf("orderer%d", i+1)
+		orderers = append(orderers, o)
+		config.Orderers[i] = &Orderer{Name: o, Organization: "OrdererOrg"}
 	}
 	config.Profiles = []*Profile{{
 		Name:     "SampleDevModeEtcdRaft",

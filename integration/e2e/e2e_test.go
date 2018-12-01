@@ -171,7 +171,7 @@ var _ = Describe("EndToEnd", func() {
 
 	Describe("three node etcdraft network with 2 orgs", func() {
 		BeforeEach(func() {
-			network = nwo.New(nwo.MultiNodeEtcdRaft(), testDir, client, BasePort(), components)
+			network = nwo.New(nwo.MultiNodeEtcdRaft(3), testDir, client, BasePort(), components)
 			network.GenerateConfigTree()
 			network.Bootstrap()
 

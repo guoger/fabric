@@ -88,7 +88,7 @@ var _ = Describe("EndToEnd Crash Fault Tolerance", func() {
 
 	When("orderer stops and restarts", func() {
 		It("keeps network up and running", func() {
-			network = nwo.New(nwo.MultiNodeEtcdRaft(), testDir, client, 33000, components)
+			network = nwo.New(nwo.MultiNodeEtcdRaft(3), testDir, client, BasePort(), components)
 
 			o1, o2, o3 := network.Orderer("orderer1"), network.Orderer("orderer2"), network.Orderer("orderer3")
 			peer = network.Peer("Org1", "peer1")
@@ -141,7 +141,7 @@ var _ = Describe("EndToEnd Crash Fault Tolerance", func() {
 
 	When("an orderer is behind the latest snapshot on leader", func() {
 		It("catches up using the block stored in snapshot", func() {
-			network = nwo.New(nwo.MultiNodeEtcdRaft(), testDir, client, 33000, components)
+			network = nwo.New(nwo.MultiNodeEtcdRaft(3), testDir, client, BasePort(), components)
 
 			o1, o2, o3 := network.Orderer("orderer1"), network.Orderer("orderer2"), network.Orderer("orderer3")
 
