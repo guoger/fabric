@@ -8,6 +8,11 @@ package etcdraft
 
 import (
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/coreos/etcd/pkg/fileutil"
 
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
@@ -36,6 +41,10 @@ type RaftStorage struct {
 	SnapshotCatchUpEntries uint64
 
 	lg *flogging.FabricLogger
+
+	gcInFlight chan struct{} // indicating it there's ongoing gc
+
+	walDir string
 
 	ram  MemoryStorage
 	wal  *wal.WAL
@@ -92,7 +101,14 @@ func CreateStorage(
 	lg.Debugf("Appending %d entries to memory storage", len(ents))
 	ram.Append(ents) // MemoryStorage.Append always return nil
 
-	return &RaftStorage{lg: lg, ram: ram, wal: w, snap: sn}, nil
+	return &RaftStorage{
+		lg:         lg,
+		walDir:     walDir,
+		gcInFlight: make(chan struct{}, 1),
+		ram:        ram,
+		wal:        w,
+		snap:       sn,
+	}, nil
 }
 
 func createSnapshotter(snapDir string) (*snap.Snapshotter, error) {
@@ -231,6 +247,16 @@ func (rs *RaftStorage) TakeSnapshot(i uint64, cs *raftpb.ConfState, data []byte)
 	}
 
 	rs.lg.Infof("Snapshot is taken at index %d", i)
+
+	select {
+	case rs.gcInFlight <- struct{}{}:
+		go func() {
+			rs.PurgeWAL()
+			<-rs.gcInFlight
+		}()
+	default:
+		rs.lg.Debugf("There is ongoing garbage collection, skip")
+	}
 	return nil
 }
 
@@ -244,6 +270,46 @@ func (rs *RaftStorage) ApplySnapshot(snap raftpb.Snapshot) {
 			rs.lg.Fatalf("Unexpected programming error: %s", err)
 		}
 	}
+}
+
+// PurgeWAL attempts to remove unused WAL files.
+// When a snapshot is taken, wal files prior to that snapshot are unlocked.
+// Therefore, if we can lock a wal file, it is subject of removal.
+func (rs *RaftStorage) PurgeWAL() {
+	names, err := fileutil.ReadDir(rs.walDir)
+	if err != nil {
+		rs.lg.Fatalf("Failed to read %s while purging wal files: %s", rs.walDir, err)
+	}
+
+	// filter files with .wal suffix
+	var wals []string
+	for _, w := range names {
+		if strings.HasSuffix(w, "wal") {
+			wals = append(wals, w)
+		}
+	}
+	sort.Strings(wals)
+	total := len(wals)
+	for {
+		f := filepath.Join(rs.walDir, wals[0])
+		l, err := fileutil.TryLockFile(f, os.O_WRONLY, fileutil.PrivateFileMode)
+		if err != nil {
+			rs.lg.Debugf("File %s is still in use, abort puring", f)
+			break
+		}
+		if err = os.Remove(f); err != nil {
+			rs.lg.Fatalf("Failed to remove %s: %s", f, err)
+		}
+		if err = l.Close(); err != nil {
+			rs.lg.Errorf("Failed to unlock file %s: %s", l.Name(), err)
+			break
+		}
+
+		rs.lg.Debugf("Successfully purged %s", f)
+		wals = wals[1:]
+	}
+
+	rs.lg.Infof("Purged %d wal files", total-len(wals))
 }
 
 // Close closes storage

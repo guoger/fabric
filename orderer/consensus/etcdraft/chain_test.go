@@ -18,6 +18,7 @@ import (
 
 	"code.cloudfoundry.org/clock/fakeclock"
 	"github.com/coreos/etcd/raft"
+	"github.com/coreos/etcd/wal"
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/bccsp/factory"
 	"github.com/hyperledger/fabric/common/crypto/tlsgen"
@@ -71,7 +72,7 @@ var _ = Describe("Chain", func() {
 	BeforeEach(func() {
 		tlsCA, _ = tlsgen.NewCA()
 		channelID = "test-channel"
-		logger = flogging.NewFabricLogger(zap.NewNop())
+		logger = flogging.NewFabricLogger(zap.NewExample())
 		env = &common.Envelope{
 			Payload: marshalOrPanic(&common.Payload{
 				Header: &common.Header{ChannelHeader: marshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_MESSAGE), ChannelId: channelID})},
@@ -819,6 +820,8 @@ var _ = Describe("Chain", func() {
 
 						ledgerLock sync.Mutex
 						ledger     []*common.Block
+
+						walCnt int
 					)
 
 					countFiles := func() int {
@@ -828,6 +831,10 @@ var _ = Describe("Chain", func() {
 					}
 
 					BeforeEach(func() {
+						// set SegmentSizeBytes so that every block is
+						// stored in its own segmented wal file.
+						wal.SegmentSizeBytes = 1
+
 						opts.SnapInterval = 2
 						opts.SnapshotCatchUpEntries = 2
 
@@ -854,11 +861,17 @@ var _ = Describe("Chain", func() {
 						err = chain.Order(env, uint64(0))
 						Expect(err).NotTo(HaveOccurred())
 						Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
+						Consistently(countFiles).Should(Equal(0))
 
 						normalBlock.Header.Number++
 						err = chain.Order(env, uint64(0))
 						Expect(err).NotTo(HaveOccurred())
 						Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
+						Consistently(countFiles).Should(Equal(0))
+
+						files, err := ioutil.ReadDir(walDir)
+						Expect(err).NotTo(HaveOccurred())
+						walCnt = len(files)
 
 						normalBlock.Header.Number++
 						err = chain.Order(env, uint64(0))
@@ -879,6 +892,10 @@ var _ = Describe("Chain", func() {
 
 						Eventually(countFiles, LongEventualTimeout).Should(Equal(1))
 						Eventually(opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", 1))
+
+						files, err := ioutil.ReadDir(walDir)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(len(files)).To(BeNumerically("<", walCnt))
 
 						// chain should still be functioning
 						normalBlock.Header.Number++
