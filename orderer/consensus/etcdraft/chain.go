@@ -112,6 +112,9 @@ type Chain struct {
 	startC   chan struct{}         // Closes when the node is started
 	snapC    chan *raftpb.Snapshot // Signal to catch up with snapshot
 
+	errorCLock sync.RWMutex
+	errorC     chan struct{} // returned by Errored()
+
 	raftMetadataLock     sync.RWMutex
 	confChangeInProgress *raftpb.ConfChange
 	justElected          bool // this is true when node has just been elected
@@ -177,6 +180,7 @@ func NewChain(
 		doneC:            make(chan struct{}),
 		startC:           make(chan struct{}),
 		snapC:            make(chan *raftpb.Snapshot),
+		errorC:           make(chan struct{}),
 		observeC:         observeC,
 		support:          support,
 		fresh:            fresh,
@@ -302,7 +306,9 @@ func (c *Chain) WaitReady() error {
 
 // Errored returns a channel that closes when the chain stops.
 func (c *Chain) Errored() <-chan struct{} {
-	return c.doneC
+	c.errorCLock.RLock()
+	defer c.errorCLock.RUnlock()
+	return c.errorC
 }
 
 // Halt stops the chain.
@@ -372,6 +378,10 @@ func (c *Chain) Submit(req *orderer.SubmitRequest, sender uint64) error {
 	case <-c.doneC:
 		return errors.Errorf("chain is stopped")
 	}
+}
+
+func isCandidate(state raft.StateType) bool {
+	return state == raft.StatePreCandidate || state == raft.StateCandidate
 }
 
 func (c *Chain) serveRequest() {
@@ -483,6 +493,18 @@ func (c *Chain) serveRequest() {
 					}
 				}
 
+				// follower -> candidate
+				if soft.RaftState == raft.StateFollower && isCandidate(app.soft.RaftState) {
+					close(c.errorC)
+				}
+
+				// candidate -> x
+				if isCandidate(soft.RaftState) && soft.RaftState != app.soft.RaftState {
+					c.errorCLock.Lock()
+					c.errorC = make(chan struct{})
+					c.errorCLock.Unlock()
+				}
+
 				soft = raft.SoftState{Lead: newLeader, RaftState: app.soft.RaftState}
 
 				// notify external observer
@@ -546,6 +568,12 @@ func (c *Chain) serveRequest() {
 			}
 
 		case <-c.doneC:
+			select {
+			case <-c.errorC: // avoid closing closed channel
+			default:
+				close(c.errorC)
+			}
+
 			c.logger.Infof("Stop serving requests")
 			return
 		}

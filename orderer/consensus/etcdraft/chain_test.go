@@ -1826,8 +1826,11 @@ var _ = Describe("Chain", func() {
 			})
 
 			When("follower is disconnected", func() {
-				It("should return error when receiving an env", func() {
+				FIt("should return error when receiving an env", func() {
 					network.disconnect(2)
+
+					errorC := c2.Errored()
+					Consistently(errorC).ShouldNot(BeClosed()) // assert that errorC is not closed
 
 					By("Ticking node 2 until it becomes pre-candidate")
 					Eventually(func() <-chan raft.SoftState {
@@ -1835,8 +1838,15 @@ var _ = Describe("Chain", func() {
 						return c2.observe
 					}, LongEventualTimeout).Should(Receive(Equal(raft.SoftState{Lead: 1, RaftState: raft.StatePreCandidate})))
 
+					Eventually(errorC).Should(BeClosed())
 					err := c2.Order(env, 0)
 					Expect(err).To(HaveOccurred())
+
+					network.connect(2)
+					c1.clock.Increment(interval)
+					Expect(errorC).To(BeClosed())
+
+					Eventually(c2.Errored).ShouldNot(BeClosed())
 				})
 			})
 
@@ -2421,7 +2431,7 @@ func newChain(timeout time.Duration, channel string, dataDir string, id uint64, 
 		MaxSizePerMsg:   1024 * 1024,
 		MaxInflightMsgs: 256,
 		RaftMetadata:    raftMetadata,
-		Logger:          flogging.NewFabricLogger(zap.NewNop()),
+		Logger:          flogging.NewFabricLogger(zap.NewExample()),
 		MemoryStorage:   storage,
 		WALDir:          path.Join(dataDir, "wal"),
 		SnapDir:         path.Join(dataDir, "snapshot"),
