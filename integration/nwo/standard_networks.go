@@ -139,7 +139,33 @@ func MultiChannelEtcdRaft() *Config {
 	return config
 }
 
-func MultiNodeEtcdRaft(size int) *Config {
+func MultiNodeEtcdRaft() *Config {
+	config := BasicEtcdRaft()
+	config.Orderers = []*Orderer{
+		{Name: "orderer1", Organization: "OrdererOrg"},
+		{Name: "orderer2", Organization: "OrdererOrg"},
+		{Name: "orderer3", Organization: "OrdererOrg"},
+	}
+	config.Profiles = []*Profile{{
+		Name:     "SampleDevModeEtcdRaft",
+		Orderers: []string{"orderer1", "orderer2", "orderer3"},
+		BatchSize: BatchSize{
+			MaxMessageCount: 1,
+		},
+		SnapshotInterval: 5,
+	}, {
+		Name:          "TwoOrgsChannel",
+		Consortium:    "SampleConsortium",
+		Organizations: []string{"Org1", "Org2"},
+		BatchSize: BatchSize{
+			MaxMessageCount: 1,
+		},
+		SnapshotInterval: 5,
+	}}
+	return config
+}
+
+func ElasticEtcdRaft(size int) *Config {
 	config := BasicEtcdRaft()
 	orderers := []string{}
 	config.Orderers = make([]*Orderer, size)
