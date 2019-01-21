@@ -13,12 +13,15 @@ import (
 	"os"
 	"os/user"
 	"path"
+	"strings"
 	"sync"
 	"time"
 
 	"code.cloudfoundry.org/clock/fakeclock"
+	"github.com/coreos/etcd/pkg/fileutil"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/coreos/etcd/wal"
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/bccsp/factory"
 	"github.com/hyperledger/fabric/common/crypto/tlsgen"
@@ -77,7 +80,7 @@ var _ = Describe("Chain", func() {
 		env = &common.Envelope{
 			Payload: marshalOrPanic(&common.Payload{
 				Header: &common.Header{ChannelHeader: marshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_MESSAGE), ChannelId: channelID})},
-				Data:   []byte("TEST_MESSAGE"),
+				Data:   make([]byte, 500),
 			}),
 		}
 	})
@@ -2148,17 +2151,44 @@ var _ = Describe("Chain", func() {
 				BeforeEach(func() {
 					c1.opts.SnapInterval = 1
 					c1.opts.SnapshotCatchUpEntries = 1
+
+					// set wal SegmentSizeBytes to a small number
+					// so that wal file is cut per block.
+					bytes, err := proto.Marshal(env)
+					Expect(err).NotTo(HaveOccurred())
+					wal.SegmentSizeBytes = int64(len(bytes))
 				})
 
 				It("keeps running if some entries in memory are purged", func() {
 					// Scenario: snapshotting is enabled on node 1 and it purges memory storage
 					// per every snapshot. Cluster should be correctly functioning.
+					//
+					// Quote doc on `wal.ReleaseLockTo`:
+					//
+					// ReleaseLockTo releases the locks, which has smaller index than the given index
+					// except the largest one among them.
+					// For example, if WAL is holding lock 1,2,3,4,5,6, ReleaseLockTo(4) will release
+					// lock 1,2 but keep 3. ReleaseLockTo(5) will release 1,2,3 but keep 4.
+
+					c1.cutter.CutNext = true
 
 					i, err := c1.opts.MemoryStorage.FirstIndex()
 					Expect(err).NotTo(HaveOccurred())
 					Expect(i).To(Equal(uint64(1)))
 
-					c1.cutter.CutNext = true
+					var wals []string
+					Eventually(func() int {
+						files, err := fileutil.ReadDir(c1.opts.WALDir)
+						Expect(err).NotTo(HaveOccurred())
+						wals = []string{}
+						for _, file := range files {
+							if strings.HasSuffix(file, "wal") {
+								wals = append(wals, file)
+							}
+						}
+						return len(wals)
+					}).Should(Equal(1))
+					wal := wals[0]
 
 					err = c1.Order(env, 0)
 					Expect(err).ToNot(HaveOccurred())
@@ -2169,6 +2199,17 @@ var _ = Describe("Chain", func() {
 						})
 
 					Eventually(c1.opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", i))
+					files, err := fileutil.ReadDir(c1.opts.WALDir)
+					Expect(err).NotTo(HaveOccurred())
+					wals = []string{}
+					for _, file := range files {
+						if strings.HasSuffix(file, "wal") {
+							wals = append(wals, file)
+						}
+					}
+					Expect(wals).To(HaveLen(2))
+					Expect(wals[0]).To(Equal(wal))
+
 					i, err = c1.opts.MemoryStorage.FirstIndex()
 					Expect(err).NotTo(HaveOccurred())
 
@@ -2181,6 +2222,17 @@ var _ = Describe("Chain", func() {
 						})
 
 					Eventually(c1.opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", i))
+					files, err = fileutil.ReadDir(c1.opts.WALDir)
+					Expect(err).NotTo(HaveOccurred())
+					wals = []string{}
+					for _, file := range files {
+						if strings.HasSuffix(file, "wal") {
+							wals = append(wals, file)
+						}
+					}
+					Expect(wals).To(HaveLen(3))
+					Expect(wals[0]).To(Equal(wal))
+
 					i, err = c1.opts.MemoryStorage.FirstIndex()
 					Expect(err).NotTo(HaveOccurred())
 
@@ -2192,7 +2244,17 @@ var _ = Describe("Chain", func() {
 							Eventually(func() int { return c.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(3))
 						})
 
-					Eventually(c1.opts.MemoryStorage.FirstIndex).Should(BeNumerically(">", i))
+					Eventually(c1.opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", i))
+					Eventually(func() string {
+						files, err := fileutil.ReadDir(c1.opts.WALDir)
+						Expect(err).NotTo(HaveOccurred())
+						for _, file := range files {
+							if strings.HasSuffix(file, "wal") {
+								return file
+							}
+						}
+						return wal
+					}).ShouldNot(Equal(wal))
 				})
 
 				It("lagged node can catch up using snapshot", func() {

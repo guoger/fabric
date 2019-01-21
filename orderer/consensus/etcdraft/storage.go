@@ -8,7 +8,10 @@ package etcdraft
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 
+	"github.com/coreos/etcd/pkg/fileutil"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/coreos/etcd/snap"
@@ -34,6 +37,9 @@ type MemoryStorage interface {
 // RaftStorage encapsulates storages needed for etcd/raft data, i.e. memory, wal
 type RaftStorage struct {
 	SnapshotCatchUpEntries uint64
+
+	walDir  string
+	snapDir string
 
 	lg *flogging.FabricLogger
 
@@ -91,7 +97,14 @@ func CreateStorage(
 	lg.Debugf("Appending %d entries to memory storage", len(ents))
 	ram.Append(ents) // MemoryStorage.Append always return nil
 
-	return &RaftStorage{lg: lg, ram: ram, wal: w, snap: sn}, nil
+	return &RaftStorage{
+		lg:      lg,
+		ram:     ram,
+		wal:     w,
+		snap:    sn,
+		walDir:  walDir,
+		snapDir: snapDir,
+	}, nil
 }
 
 func createSnapshotter(snapDir string) (*snap.Snapshotter, error) {
@@ -224,7 +237,51 @@ func (rs *RaftStorage) TakeSnapshot(i uint64, cs *raftpb.ConfState, data []byte)
 		}
 	}
 
+	if err := rs.PurgeWAL(); err != nil {
+		return errors.Errorf("failed to purge WAL files: %s", err)
+	}
+
 	rs.lg.Infof("Snapshot is taken at index %d", i)
+	return nil
+}
+
+// PurgeWAL purges stale WAL files
+func (rs *RaftStorage) PurgeWAL() error {
+	walFiles, err := fileutil.ReadDir(rs.walDir)
+	if err != nil {
+		return errors.Errorf("failed to read WAL directory %s: %s", rs.walDir, err)
+	}
+
+	var files []string
+	for _, f := range walFiles {
+		if !strings.HasSuffix(f, "wal") {
+			continue
+		}
+
+		files = append(files, filepath.Join(rs.walDir, f))
+	}
+
+	return rs.purge(files)
+}
+
+func (rs *RaftStorage) purge(files []string) error {
+	for _, file := range files {
+		l, err := fileutil.TryLockFile(file, os.O_WRONLY, fileutil.PrivateFileMode)
+		if err != nil {
+			break
+		}
+
+		if err = os.Remove(file); err != nil {
+			return errors.Errorf("failed to purge %s: %s", file, err)
+		}
+
+		if err = l.Close(); err != nil {
+			rs.lg.Warnf("Failed to close file lock %s: %s", l.Name(), err)
+		}
+
+		rs.lg.Debugf("Purged %s", file)
+	}
+
 	return nil
 }
 
