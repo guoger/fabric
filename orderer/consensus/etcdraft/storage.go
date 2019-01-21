@@ -219,7 +219,7 @@ func (rs *RaftStorage) TakeSnapshot(i uint64, cs *raftpb.ConfState, data []byte)
 			if err == raft.ErrCompacted {
 				rs.lg.Warnf("Raft entries prior to %d are already purged", compacti)
 			} else {
-				rs.lg.Fatalf("Failed to purg raft entries: %s", err)
+				rs.lg.Fatalf("Failed to purge raft entries: %s", err)
 			}
 		}
 	}
