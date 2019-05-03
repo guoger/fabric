@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/hyperledger/fabric/integration/helpers"
 	"github.com/hyperledger/fabric/integration/nwo"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -21,7 +22,7 @@ func TestPluggable(t *testing.T) {
 }
 
 var components *nwo.Components
-var suiteBase = 35000
+var suiteBase = helpers.PluggableBasePort
 
 var _ = SynchronizedBeforeSuite(func() []byte {
 	components = &nwo.Components{}
