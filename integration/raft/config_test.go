@@ -4,7 +4,7 @@ Copyright IBM Corp All Rights Reserved.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package e2e
+package raft
 
 import (
 	"bytes"
@@ -19,10 +19,15 @@ import (
 
 	"github.com/fsouza/go-dockerclient"
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric/core/aclmgmt/resources"
+	"github.com/hyperledger/fabric/integration/helpers"
 	"github.com/hyperledger/fabric/integration/nwo"
 	"github.com/hyperledger/fabric/integration/nwo/commands"
+	"github.com/hyperledger/fabric/internal/configtxgen/encoder"
+	"github.com/hyperledger/fabric/internal/configtxgen/localconfig"
 	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/msp"
+	protosorderer "github.com/hyperledger/fabric/protos/orderer"
 	"github.com/hyperledger/fabric/protos/orderer/etcdraft"
 	"github.com/hyperledger/fabric/protoutil"
 	. "github.com/onsi/ginkgo"
@@ -36,14 +41,16 @@ import (
 
 var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 	var (
-		testDir string
-		client  *docker.Client
-		network *nwo.Network
-		mycc    nwo.Chaincode
-		mycc2   nwo.Chaincode
-		mycc3   nwo.Chaincode
-		peer    *nwo.Peer
+		testDir   string
+		client    *docker.Client
+		network   *nwo.Network
+		mycc      nwo.Chaincode
+		mycc2     nwo.Chaincode
+		mycc3     nwo.Chaincode
+		peer      *nwo.Peer
+		chaincode nwo.Chaincode
 
+		process          ifrit.Process
 		peerProcesses    ifrit.Process
 		ordererProcesses []ifrit.Process
 		ordererRunners   []*ginkgomon.Runner
@@ -99,6 +106,178 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 		os.RemoveAll(testDir)
 	})
 
+	Describe("three node etcdraft network with 2 orgs", func() {
+		BeforeEach(func() {
+			network = nwo.New(nwo.MultiNodeEtcdRaft(), testDir, client, StartPort(), components)
+			network.GenerateConfigTree()
+			network.Bootstrap()
+
+			networkRunner := network.NetworkGroupRunner()
+			process = ifrit.Invoke(networkRunner)
+			Eventually(process.Ready(), network.EventuallyTimeout).Should(BeClosed())
+		})
+
+		// This tests:
+		//
+		// 1. channel creation with raft orderer,
+		// 2. all the nodes on three-node raft cluster are in sync wrt blocks,
+		// 3. raft orderer processes type A config updates and delivers the
+		//    config blocks to the peers.
+		It("executes an etcdraft network with 2 orgs and three orderer nodes", func() {
+			orderer1 := network.Orderer("orderer1")
+			orderer2 := network.Orderer("orderer2")
+			orderer3 := network.Orderer("orderer3")
+			peer := network.Peer("Org1", "peer1")
+			org1Peer0 := network.Peer("Org1", "peer0")
+			blockFile1 := filepath.Join(testDir, "newest_orderer1_block.pb")
+			blockFile2 := filepath.Join(testDir, "newest_orderer2_block.pb")
+			blockFile3 := filepath.Join(testDir, "newest_orderer3_block.pb")
+
+			By("Ordering service system channel is ready")
+			assertBlockReception(map[string]int{
+				"systemchannel": 0,
+			}, []*nwo.Orderer{orderer1, orderer2, orderer3}, peer, network)
+
+			fetchLatestBlock := func(targetOrderer *nwo.Orderer, blockFile string) {
+				c := commands.ChannelFetch{
+					ChannelID:  "testchannel",
+					Block:      "newest",
+					OutputFile: blockFile,
+				}
+				if targetOrderer != nil {
+					c.Orderer = network.OrdererAddress(targetOrderer, nwo.ListenPort)
+				}
+				sess, err := network.PeerAdminSession(org1Peer0, c)
+				Expect(err).NotTo(HaveOccurred())
+				Eventually(sess, network.EventuallyTimeout).Should(gexec.Exit(0))
+			}
+
+			By("creating a new chain and having the peers join it to test for channel creation")
+			network.CreateAndJoinChannel(orderer1, "testchannel")
+			nwo.DeployChaincode(network, "testchannel", orderer1, chaincode)
+			helpers.RunQueryInvokeQuery(network, orderer1, peer, "testchannel")
+
+			// the above can work even if the orderer nodes are not in the same Raft
+			// cluster; we need to verify all the three orderer nodes are in sync wrt
+			// blocks.
+			By("fetching the latest blocks from all the orderer nodes and testing them for equality")
+			fetchLatestBlock(orderer1, blockFile1)
+			fetchLatestBlock(orderer2, blockFile2)
+			fetchLatestBlock(orderer3, blockFile3)
+			b1 := nwo.UnmarshalBlockFromFile(blockFile1)
+			b2 := nwo.UnmarshalBlockFromFile(blockFile2)
+			b3 := nwo.UnmarshalBlockFromFile(blockFile3)
+			Expect(protoutil.BlockHeaderBytes(b1.Header)).To(Equal(protoutil.BlockHeaderBytes(b2.Header)))
+			Expect(protoutil.BlockHeaderBytes(b2.Header)).To(Equal(protoutil.BlockHeaderBytes(b3.Header)))
+
+			By("updating ACL policies to test for type A configuration updates")
+			invokeChaincode := commands.ChaincodeInvoke{
+				ChannelID:    "testchannel",
+				Orderer:      network.OrdererAddress(orderer1, nwo.ListenPort),
+				Name:         chaincode.Name,
+				Ctor:         `{"Args":["invoke","a","b","10"]}`,
+				WaitForEvent: true,
+			}
+			// setting the filtered block event ACL policy to org2/Admins
+			policyName := resources.Event_FilteredBlock
+			policy := "/Channel/Application/org2/Admins"
+			helpers.SetACLPolicy(network, "testchannel", policyName, policy, "orderer1")
+			// invoking chaincode as a forbidden Org1 Admin identity
+			sess, err := network.PeerAdminSession(org1Peer0, invokeChaincode)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(sess.Err, network.EventuallyTimeout).Should(gbytes.Say(`\Qdeliver completed with status (FORBIDDEN)\E`))
+		})
+	})
+
+	Describe("Invalid Raft config metadata", func() {
+		It("refuses to start orderer or rejects config update", func() {
+			By("Creating malformed genesis block")
+			network = nwo.New(nwo.BasicEtcdRaft(), testDir, client, StartPort(), components)
+			network.GenerateConfigTree()
+			network.Bootstrap()
+
+			sysProfile := localconfig.Load(network.SystemChannel.Profile, network.RootDir)
+			Expect(sysProfile.Orderer).NotTo(BeNil())
+			sysProfile.Orderer.EtcdRaft.Options.ElectionTick = sysProfile.Orderer.EtcdRaft.Options.HeartbeatTick
+			pgen := encoder.New(sysProfile)
+			genesisBlock := pgen.GenesisBlockForChannel(network.SystemChannel.Name)
+			data, err := proto.Marshal(genesisBlock)
+			Expect(err).NotTo(HaveOccurred())
+			ioutil.WriteFile(network.OutputBlockPath(network.SystemChannel.Name), data, 0644)
+
+			By("Starting orderer with malformed genesis block")
+			ordererRunner := network.OrdererGroupRunner()
+			process = ifrit.Invoke(ordererRunner)
+			Eventually(process.Wait, network.EventuallyTimeout).Should(Receive()) // orderer process should exit
+			os.RemoveAll(testDir)
+
+			By("Starting orderer with correct genesis block")
+			testDir, err = ioutil.TempDir("", "e2e")
+			Expect(err).NotTo(HaveOccurred())
+			network = nwo.New(nwo.BasicEtcdRaft(), testDir, client, StartPort(), components)
+			network.GenerateConfigTree()
+			network.Bootstrap()
+
+			orderer := network.Orderer("orderer")
+			runner := network.OrdererRunner(orderer)
+			process = ifrit.Invoke(runner)
+			Eventually(process.Ready, network.EventuallyTimeout).Should(BeClosed())
+
+			By("Waiting for system channel to be ready")
+			FindLeader([]*ginkgomon.Runner{runner})
+
+			By("Creating malformed channel creation config tx")
+			channel := "testchannel"
+			sysProfile = localconfig.Load(network.SystemChannel.Profile, network.RootDir)
+			Expect(sysProfile.Orderer).NotTo(BeNil())
+			appProfile := localconfig.Load(network.ProfileForChannel(channel), network.RootDir)
+			Expect(appProfile).NotTo(BeNil())
+			o := *sysProfile.Orderer
+			appProfile.Orderer = &o
+			appProfile.Orderer.EtcdRaft = proto.Clone(sysProfile.Orderer.EtcdRaft).(*etcdraft.ConfigMetadata)
+			appProfile.Orderer.EtcdRaft.Options.HeartbeatTick = appProfile.Orderer.EtcdRaft.Options.ElectionTick
+			configtx, err := encoder.MakeChannelCreationTransactionWithSystemChannelContext(channel, nil, appProfile, sysProfile)
+			Expect(err).NotTo(HaveOccurred())
+			data, err = proto.Marshal(configtx)
+			Expect(err).NotTo(HaveOccurred())
+			ioutil.WriteFile(network.CreateChannelTxPath(channel), data, 0644)
+
+			By("Submitting malformed channel creation config tx to orderer")
+			peer1org1 := network.Peer("Org1", "peer1")
+			peer1org2 := network.Peer("Org2", "peer1")
+
+			network.CreateChannelFail(channel, orderer, peer1org1, peer1org1, peer1org2, orderer)
+			Consistently(process.Wait).ShouldNot(Receive()) // malformed tx should not crash orderer
+			Expect(runner.Err()).To(gbytes.Say(`rejected by Configure: ElectionTick \(10\) must be greater than HeartbeatTick \(10\)`))
+
+			By("Submitting channel config update with illegal value")
+			channel = network.SystemChannel.Name
+			config := nwo.GetConfig(network, peer1org1, orderer, channel)
+			updatedConfig := proto.Clone(config).(*common.Config)
+
+			consensusTypeConfigValue := updatedConfig.ChannelGroup.Groups["Orderer"].Values["ConsensusType"]
+			consensusTypeValue := &protosorderer.ConsensusType{}
+			Expect(proto.Unmarshal(consensusTypeConfigValue.Value, consensusTypeValue)).To(Succeed())
+
+			metadata := &etcdraft.ConfigMetadata{}
+			Expect(proto.Unmarshal(consensusTypeValue.Metadata, metadata)).To(Succeed())
+
+			metadata.Options.HeartbeatTick = 10
+			metadata.Options.ElectionTick = 10
+
+			newMetadata, err := proto.Marshal(metadata)
+			Expect(err).NotTo(HaveOccurred())
+			consensusTypeValue.Metadata = newMetadata
+
+			updatedConfig.ChannelGroup.Groups["Orderer"].Values["ConsensusType"] = &common.ConfigValue{
+				ModPolicy: "Admins",
+				Value:     protoutil.MarshalOrPanic(consensusTypeValue),
+			}
+
+			nwo.UpdateOrdererConfigFail(network, orderer, channel, config, updatedConfig, peer1org1, orderer)
+		})
+	})
+
 	When("a single node cluster is expanded", func() {
 		It("is still possible to onboard the new cluster member", func() {
 			launch := func(o *nwo.Orderer) {
@@ -124,7 +303,7 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 			launch(orderer)
 
 			By("Checking that it elected itself as a leader")
-			findLeader(ordererRunners)
+			FindLeader(ordererRunners)
 
 			By("Extending the network configuration to add a new orderer")
 			orderer2 := &nwo.Orderer{
@@ -165,7 +344,7 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 			By("Launching the second orderer")
 			launch(orderer2)
 			By("Waiting for a leader to be re-elected")
-			findLeader(ordererRunners)
+			FindLeader(ordererRunners)
 		})
 	})
 
@@ -194,7 +373,7 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 			}
 
 			By("Finding leader")
-			leader := findLeader(ordererRunners)
+			leader := FindLeader(ordererRunners)
 			leaderIndex := leader - 1
 			blockSeq := 0
 
@@ -686,7 +865,7 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 			orderers := []*nwo.Orderer{o1, o2, o3}
 
 			By("Waiting for them to elect a leader")
-			firstEvictedNode := findLeader(ordererRunners) - 1
+			firstEvictedNode := FindLeader(ordererRunners) - 1
 
 			By("Removing the leader from 3-node channel")
 			serverCertBytes, err := ioutil.ReadFile(filepath.Join(network.OrdererLocalTLSDir(orderers[firstEvictedNode]), "server.crt"))
@@ -713,7 +892,7 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 				survivedOrdererRunners = append(survivedOrdererRunners, ordererRunners[i])
 			}
 
-			secondEvictedNode := findLeader(survivedOrdererRunners) - 1
+			secondEvictedNode := FindLeader(survivedOrdererRunners) - 1
 
 			var surviver int
 			for i := range orderers {
@@ -735,7 +914,7 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 			ensureEvicted(orderers[secondEvictedNode], peer, network, "systemchannel")
 
 			By("Asserting the only remaining node elects itself")
-			findLeader([]*ginkgomon.Runner{ordererRunners[surviver]})
+			FindLeader([]*ginkgomon.Runner{ordererRunners[surviver]})
 		})
 
 		It("notices it even if it is down at the time of its eviction", func() {
@@ -746,7 +925,7 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 			orderers := []*nwo.Orderer{o1, o2, o3}
 
 			By("Waiting for them to elect a leader")
-			findLeader(ordererRunners)
+			FindLeader(ordererRunners)
 
 			By("Creating a channel")
 			network.CreateChannel("testchannel", o1, peer)
@@ -822,7 +1001,7 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 			})
 
 			By("Ensuring the re-added orderer joins the Raft cluster")
-			findLeader([]*ginkgomon.Runner{ordererRunner})
+			FindLeader([]*ginkgomon.Runner{ordererRunner})
 		})
 	})
 
@@ -1064,7 +1243,7 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 		}
 
 		By("Waiting for system channel to be ready")
-		findLeader(ordererRunners)
+		FindLeader(ordererRunners)
 
 		peer := network.Peer("Org1", "peer1")
 		channel := "systemchannel"

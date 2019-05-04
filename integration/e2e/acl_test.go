@@ -7,7 +7,6 @@ SPDX-License-Identifier: Apache-2.0
 package e2e
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -16,13 +15,9 @@ import (
 	"time"
 
 	docker "github.com/fsouza/go-dockerclient"
-	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/core/aclmgmt/resources"
 	"github.com/hyperledger/fabric/integration/nwo"
 	"github.com/hyperledger/fabric/integration/nwo/commands"
-	"github.com/hyperledger/fabric/protos/common"
-	pb "github.com/hyperledger/fabric/protos/peer"
-	"github.com/hyperledger/fabric/protoutil"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gbytes"
@@ -238,57 +233,3 @@ var _ = Describe("EndToEndACL", func() {
 		ItEnforcesPolicy("cscc", "GetConfigTree", "testchannel")
 	})
 })
-
-// SetACLPolicy sets the ACL policy for a running network. It resets all
-// previously defined ACL policies, generates the config update, signs the
-// configuration with Org2's signer, and then submits the config update using
-// Org1.
-func SetACLPolicy(network *nwo.Network, channel, policyName, policy string, ordererName string) {
-	orderer := network.Orderer(ordererName)
-	submitter := network.Peer("Org1", "peer0")
-	signer := network.Peer("Org2", "peer0")
-
-	config := nwo.GetConfig(network, submitter, orderer, channel)
-	updatedConfig := proto.Clone(config).(*common.Config)
-
-	// set the policy
-	updatedConfig.ChannelGroup.Groups["Application"].Values["ACLs"] = &common.ConfigValue{
-		ModPolicy: "Admins",
-		Value: protoutil.MarshalOrPanic(&pb.ACLs{
-			Acls: map[string]*pb.APIResource{
-				policyName: {PolicyRef: policy},
-			},
-		}),
-	}
-
-	nwo.UpdateConfig(network, orderer, channel, config, updatedConfig, true, submitter, signer)
-}
-
-// GetTxIDFromBlock gets a transaction id from a block that has been
-// marshaled and stored on the filesystem
-func GetTxIDFromBlockFile(blockFile string) string {
-	block := nwo.UnmarshalBlockFromFile(blockFile)
-
-	envelope, err := protoutil.GetEnvelopeFromBlock(block.Data.Data[0])
-	Expect(err).NotTo(HaveOccurred())
-
-	payload, err := protoutil.GetPayload(envelope)
-	Expect(err).NotTo(HaveOccurred())
-
-	chdr, err := protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
-	Expect(err).NotTo(HaveOccurred())
-
-	return chdr.TxId
-}
-
-// ToCLIChaincodeArgs converts string args to args for use with chaincode calls
-// from the CLI.
-func ToCLIChaincodeArgs(args ...string) string {
-	type cliArgs struct {
-		Args []string
-	}
-	cArgs := &cliArgs{Args: args}
-	cArgsJSON, err := json.Marshal(cArgs)
-	Expect(err).NotTo(HaveOccurred())
-	return string(cArgsJSON)
-}

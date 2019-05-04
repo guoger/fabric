@@ -15,4 +15,5 @@ const (
 	PluggableBasePort
 	E2eBasePort
 	GossipBasePort
+	RaftBasePort
 )

@@ -4,7 +4,7 @@ Copyright IBM Corp All Rights Reserved.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package e2e
+package raft
 
 import (
 	"fmt"
@@ -12,12 +12,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
-	"sync"
 	"syscall"
 	"time"
 
 	docker "github.com/fsouza/go-dockerclient"
+	"github.com/hyperledger/fabric/integration/helpers"
 	"github.com/hyperledger/fabric/integration/nwo"
 	"github.com/hyperledger/fabric/integration/nwo/commands"
 	"github.com/hyperledger/fabric/protoutil"
@@ -137,7 +136,7 @@ var _ = Describe("EndToEnd Crash Fault Tolerance", func() {
 			Eventually(o1Proc.Ready()).Should(BeClosed())
 
 			By("executing transaction with restarted orderer")
-			RunQueryInvokeQuery(network, o1, peer, "testchannel")
+			helpers.RunQueryInvokeQuery(network, o1, peer, "testchannel")
 
 			fetchLatestBlock(o1, blockFile1)
 			fetchLatestBlock(o2, blockFile2)
@@ -264,7 +263,7 @@ var _ = Describe("EndToEnd Crash Fault Tolerance", func() {
 			By("Waiting for them to elect a leader")
 			ordererProcesses := []ifrit.Process{o1Proc, o2Proc, o3Proc}
 			remainingAliveRunners := []*ginkgomon.Runner{o1Runner, o2Runner, o3Runner}
-			leader := findLeader(remainingAliveRunners)
+			leader := FindLeader(remainingAliveRunners)
 
 			leaderIndex := leader - 1
 			By(fmt.Sprintf("Killing the leader (%d)", leader))
@@ -276,7 +275,7 @@ var _ = Describe("EndToEnd Crash Fault Tolerance", func() {
 			remainingAliveRunners = append(remainingAliveRunners[:leaderIndex], remainingAliveRunners[leaderIndex+1:]...)
 
 			By("Waiting for a new leader to be elected")
-			leader = findLeader(remainingAliveRunners)
+			leader = FindLeader(remainingAliveRunners)
 			By(fmt.Sprintf("Orderer %d took over as a leader", leader))
 		})
 	})
@@ -312,7 +311,7 @@ var _ = Describe("EndToEnd Crash Fault Tolerance", func() {
 			By("Waiting for them to elect a leader")
 			ordererProcesses := []ifrit.Process{o1Proc, o2Proc, o3Proc}
 			remainingAliveRunners := []*ginkgomon.Runner{o1Runner, o2Runner, o3Runner}
-			leaderID := findLeader(remainingAliveRunners)
+			leaderID := FindLeader(remainingAliveRunners)
 			leaderIndex := leaderID - 1
 			leader := orderers[leaderIndex]
 
@@ -384,49 +383,4 @@ func RunQuery(n *nwo.Network, orderer *nwo.Orderer, peer *nwo.Peer, channel stri
 	Expect(err).NotTo(HaveOccurred())
 	Expect(i).To(Equal(1))
 	return int(result)
-}
-
-func findLeader(ordererRunners []*ginkgomon.Runner) int {
-	var wg sync.WaitGroup
-	wg.Add(len(ordererRunners))
-
-	findLeader := func(runner *ginkgomon.Runner) int {
-		Eventually(runner.Err(), time.Minute, time.Second).Should(gbytes.Say("Raft leader changed: [0-9] -> "))
-
-		idBuff := make([]byte, 1)
-		runner.Err().Read(idBuff)
-
-		newLeader, err := strconv.ParseInt(string(idBuff), 10, 32)
-		Expect(err).To(BeNil())
-		return int(newLeader)
-	}
-
-	leaders := make(chan int, len(ordererRunners))
-
-	for _, runner := range ordererRunners {
-		go func(runner *ginkgomon.Runner) {
-			defer GinkgoRecover()
-			defer wg.Done()
-
-			for {
-				leader := findLeader(runner)
-				if leader != 0 {
-					leaders <- leader
-					break
-				}
-			}
-		}(runner)
-	}
-
-	wg.Wait()
-
-	close(leaders)
-	firstLeader := <-leaders
-	for leader := range leaders {
-		if firstLeader != leader {
-			Fail(fmt.Sprintf("First leader is %d but saw %d also as a leader", firstLeader, leader))
-		}
-	}
-
-	return firstLeader
 }
