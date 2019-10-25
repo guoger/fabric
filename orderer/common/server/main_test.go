@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ import (
 	"github.com/hyperledger/fabric/internal/configtxgen/encoder"
 	"github.com/hyperledger/fabric/internal/configtxgen/genesisconfig"
 	"github.com/hyperledger/fabric/internal/pkg/identity"
+	"github.com/hyperledger/fabric/orderer/common/bootstrap/file"
 	"github.com/hyperledger/fabric/orderer/common/cluster"
 	"github.com/hyperledger/fabric/orderer/common/localconfig"
 	"github.com/hyperledger/fabric/orderer/common/multichannel"
@@ -210,10 +212,7 @@ func TestInitializeBootstrapChannel(t *testing.T) {
 	assert.NoError(t, err)
 	bootstrapConfig := &localconfig.TopLevel{
 		General: localconfig.General{
-			GenesisMethod:  "provisional",
-			GenesisProfile: "SampleSingleMSPSolo",
-			GenesisFile:    "genesisblock",
-			SystemChannel:  "testchannelid",
+			GenesisFile: filepath.Join("testdata", "genesis.block"),
 		},
 	}
 
@@ -346,25 +345,23 @@ func TestInitializeMultiChainManager(t *testing.T) {
 	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
 	assert.NoError(t, err)
 
-	assert.NotPanics(t, func() {
-		signer := &server_mocks.SignerSerializer{}
-		lf, _, err := createLedgerFactory(conf, &disabled.Provider{})
-		assert.NoError(t, err)
-		bootBlock := encoder.New(genesisconfig.Load(genesisconfig.SampleDevModeSoloProfile)).GenesisBlockForChannel("system")
-		initializeMultichannelRegistrar(
-			bootBlock,
-			&replicationInitiator{cryptoProvider: cryptoProvider},
-			&cluster.PredicateDialer{},
-			comm.ServerConfig{},
-			nil,
-			conf,
-			signer,
-			&disabled.Provider{},
-			&server_mocks.HealthChecker{},
-			lf,
-			cryptoProvider,
-		)
-	})
+	signer := &server_mocks.SignerSerializer{}
+	lf, _, err := createLedgerFactory(conf, &disabled.Provider{})
+	assert.NoError(t, err)
+	bootBlock := file.New(filepath.Join("testdata", "genesis.block")).GenesisBlock()
+	initializeMultichannelRegistrar(
+		bootBlock,
+		&replicationInitiator{cryptoProvider: cryptoProvider},
+		&cluster.PredicateDialer{},
+		comm.ServerConfig{},
+		nil,
+		conf,
+		signer,
+		&disabled.Provider{},
+		&server_mocks.HealthChecker{},
+		lf,
+		cryptoProvider,
+	)
 }
 
 func TestInitializeGrpcServer(t *testing.T) {
@@ -404,6 +401,7 @@ func TestUpdateTrustedRoots(t *testing.T) {
 	port, _ := strconv.ParseUint(strings.Split(listenAddr, ":")[1], 10, 16)
 	conf := &localconfig.TopLevel{
 		General: localconfig.General{
+			GenesisFile:   path.Join("testdata", "genesis.block"),
 			ListenAddress: "localhost",
 			ListenPort:    uint16(port),
 			TLS: localconfig.TLS{
@@ -425,7 +423,7 @@ func TestUpdateTrustedRoots(t *testing.T) {
 	}
 	lf, _, err := createLedgerFactory(conf, &disabled.Provider{})
 	assert.NoError(t, err)
-	bootBlock := encoder.New(genesisconfig.Load(genesisconfig.SampleDevModeSoloProfile)).GenesisBlockForChannel("system")
+	bootBlock := file.New(filepath.Join("testdata", "genesis.block")).GenesisBlock()
 	signer := &server_mocks.SignerSerializer{}
 
 	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
@@ -769,11 +767,9 @@ func genesisConfig(t *testing.T) *localconfig.TopLevel {
 	localMSPDir := configtest.GetDevMspDir()
 	return &localconfig.TopLevel{
 		General: localconfig.General{
-			GenesisMethod:  "provisional",
-			GenesisProfile: "SampleDevModeSolo",
-			SystemChannel:  "testchannelid",
-			LocalMSPDir:    localMSPDir,
-			LocalMSPID:     "SampleOrg",
+			GenesisFile: filepath.Join("testdata", "genesis.block"),
+			LocalMSPDir: localMSPDir,
+			LocalMSPID:  "SampleOrg",
 			BCCSP: &factory.FactoryOpts{
 				ProviderName: "SW",
 				SwOpts: &factory.SwOpts{

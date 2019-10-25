@@ -41,8 +41,6 @@ import (
 	"github.com/hyperledger/fabric/common/tools/protolator"
 	"github.com/hyperledger/fabric/core/comm"
 	"github.com/hyperledger/fabric/core/operations"
-	"github.com/hyperledger/fabric/internal/configtxgen/encoder"
-	"github.com/hyperledger/fabric/internal/configtxgen/genesisconfig"
 	"github.com/hyperledger/fabric/internal/pkg/identity"
 	"github.com/hyperledger/fabric/msp"
 	"github.com/hyperledger/fabric/orderer/common/bootstrap/file"
@@ -147,10 +145,7 @@ func Main() {
 		}
 
 		r = createReplicator(lf, bootstrapBlock, conf, clusterClientConfig.SecOpts, signer, cryptoProvider)
-		// Only clusters that are equipped with a recent config block can replicate.
-		if conf.General.GenesisMethod == "file" {
-			r.replicateIfNeeded(bootstrapBlock)
-		}
+		r.replicateIfNeeded(bootstrapBlock)
 
 		if reuseGrpcListener = reuseListener(conf, typ); !reuseGrpcListener {
 			clusterServerConfig, clusterGRPCServer = configureClusterListener(conf, serverConfig, ioutil.ReadFile)
@@ -569,19 +564,7 @@ func grpcLeveler(ctx context.Context, fullMethod string) zapcore.Level {
 }
 
 func extractBootstrapBlock(conf *localconfig.TopLevel) *cb.Block {
-	var bootstrapBlock *cb.Block
-
-	// Select the bootstrapping mechanism
-	switch conf.General.GenesisMethod {
-	case "provisional":
-		bootstrapBlock = encoder.New(genesisconfig.Load(conf.General.GenesisProfile)).GenesisBlockForChannel(conf.General.SystemChannel)
-	case "file":
-		bootstrapBlock = file.New(conf.General.GenesisFile).GenesisBlock()
-	default:
-		logger.Panic("Unknown genesis method:", conf.General.GenesisMethod)
-	}
-
-	return bootstrapBlock
+	return file.New(conf.General.GenesisFile).GenesisBlock()
 }
 
 func initializeBootstrapChannel(genesisBlock *cb.Block, lf blockledger.Factory) {
