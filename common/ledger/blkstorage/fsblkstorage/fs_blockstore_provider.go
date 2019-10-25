@@ -17,11 +17,15 @@ limitations under the License.
 package fsblkstorage
 
 import (
+	"os"
+	"path/filepath"
+
 	"github.com/hyperledger/fabric/common/ledger/blkstorage"
 	"github.com/hyperledger/fabric/common/ledger/dataformat"
 	"github.com/hyperledger/fabric/common/ledger/util"
 	"github.com/hyperledger/fabric/common/ledger/util/leveldbhelper"
 	"github.com/hyperledger/fabric/common/metrics"
+	"github.com/pkg/errors"
 )
 
 func dataFormatVersion(indexConfig *blkstorage.IndexConfig) string {
@@ -51,6 +55,19 @@ func NewProvider(conf *Conf, indexConfig *blkstorage.IndexConfig, metricsProvide
 	if err != nil {
 		return nil, err
 	}
+
+	dirPath := filepath.Join(conf.blockStorageDir, ChainsDir)
+	if _, err := os.Stat(dirPath); err != nil {
+		if !os.IsNotExist(err) { // NotExist is the only permitted error type
+			return nil, errors.Wrapf(err, "failed to read ledger directory %s", dirPath)
+		}
+
+		logger.Info("Creating new file ledger directory at", dirPath)
+		if err = os.Mkdir(dirPath, 0755); err != nil {
+			return nil, errors.Wrapf(err, "failed to create ledger directory: %s", dirPath)
+		}
+	}
+
 	// create stats instance at provider level and pass to newFsBlockStore
 	stats := newStats(metricsProvider)
 	return &FsBlockstoreProvider{conf, indexConfig, p, stats}, nil
