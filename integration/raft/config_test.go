@@ -876,7 +876,7 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 			}
 		})
 
-		It("doesn't complain and does it obediently", func() {
+		FIt("doesn't complain and does it obediently", func() {
 			o1, o2, o3 := network.Orderer("orderer1"), network.Orderer("orderer2"), network.Orderer("orderer3")
 			orderers := []*nwo.Orderer{o1, o2, o3}
 
@@ -927,6 +927,51 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 
 			By("Ensuring the evicted orderer now doesn't serve clients")
 			ensureEvicted(orderers[secondEvictedNode], peer, network, "systemchannel")
+
+			By("Restarting second evicted node")
+			process := ordererProcesses[secondEvictedNode]
+			process.Signal(syscall.SIGTERM)
+			Eventually(process.Wait(), network.EventuallyTimeout).Should(Receive())
+
+			runner := network.OrdererRunner(orderers[secondEvictedNode])
+			ordererRunners[secondEvictedNode] = runner
+			process = ifrit.Invoke(runner)
+			ordererProcesses[secondEvictedNode] = process
+			Eventually(process.Ready(), network.EventuallyTimeout).Should(BeClosed())
+
+			time.Sleep(10 * time.Second)
+
+			By("Ensuring on more time the evicted orderer now doesn't serve clients")
+			ensureEvicted(orderers[secondEvictedNode], peer, network, "systemchannel")
+
+			By("Re-adding first evicted orderer")
+			nwo.AddConsenter(network, peer, network.Orderers[surviver], "systemchannel", etcdraft.Consenter{
+				Host:          "127.0.0.1",
+				Port:          uint32(network.OrdererPort(orderers[secondEvictedNode], nwo.ClusterPort)),
+				ClientTlsCert: serverCertBytes,
+				ServerTlsCert: serverCertBytes,
+			})
+
+			//By("Restarting second evicted node")
+			//process := ordererProcesses[secondEvictedNode]
+			//process.Signal(syscall.SIGTERM)
+			//Eventually(process.Wait(), network.EventuallyTimeout).Should(Receive())
+			//
+			//runner := network.OrdererRunner(orderers[secondEvictedNode])
+			//ordererRunners[secondEvictedNode] = runner
+			//process = ifrit.Invoke(runner)
+			//ordererProcesses[secondEvictedNode] = process
+			//Eventually(process.Ready(), network.EventuallyTimeout).Should(BeClosed())
+
+			By("Ensuring re-added orderer starts serving system channel")
+			assertBlockReception(map[string]int{
+				"systemchannel": 3,
+			}, []*nwo.Orderer{orderers[secondEvictedNode]}, peer, network)
+
+			env := CreateBroadcastEnvelope(network, orderers[secondEvictedNode], network.SystemChannel.Name, []byte("foo"))
+			resp, err := Broadcast(network, o1, env)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Status).To(Equal(common.Status_SUCCESS))
 		})
 
 		It("notices it even if it is down at the time of its eviction", func() {
