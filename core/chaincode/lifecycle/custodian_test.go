@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
+	extccmock "github.com/hyperledger/fabric/core/chaincode/extcc/mock"
 	"github.com/hyperledger/fabric/core/chaincode/lifecycle"
 	"github.com/hyperledger/fabric/core/chaincode/lifecycle/mock"
 	"github.com/hyperledger/fabric/core/container"
@@ -19,11 +20,12 @@ import (
 
 var _ = Describe("Custodian", func() {
 	var (
-		cc            *lifecycle.ChaincodeCustodian
-		fakeBuilder   *mock.ChaincodeBuilder
-		fakeLauncher  *mock.ChaincodeLauncher
-		buildRegistry *container.BuildRegistry
-		doneC         chan struct{}
+		cc                *lifecycle.ChaincodeCustodian
+		fakeBuilder       *mock.ChaincodeBuilder
+		fakeLauncher      *mock.ChaincodeLauncher
+		fakeStreamHandler *extccmock.StreamHandler
+		buildRegistry     *container.BuildRegistry
+		doneC             chan struct{}
 	)
 
 	BeforeEach(func() {
@@ -31,10 +33,11 @@ var _ = Describe("Custodian", func() {
 		fakeBuilder.BuildReturnsOnCall(1, fmt.Errorf("fake-build-error"))
 		fakeLauncher = &mock.ChaincodeLauncher{}
 		buildRegistry = &container.BuildRegistry{}
+		fakeStreamHandler = &extccmock.StreamHandler{}
 		cc = lifecycle.NewChaincodeCustodian()
 		doneC = make(chan struct{})
 		go func() {
-			cc.Work(buildRegistry, fakeBuilder, fakeLauncher)
+			cc.Work(buildRegistry, fakeBuilder, fakeLauncher, fakeStreamHandler)
 			close(doneC)
 		}()
 	})
@@ -90,9 +93,15 @@ var _ = Describe("Custodian", func() {
 		cc.NotifyInstalledAndRunnable("ccid2")
 		cc.NotifyInstalledAndRunnable("ccid3")
 		Eventually(fakeLauncher.LaunchCallCount).Should(Equal(3))
-		Expect(fakeLauncher.LaunchArgsForCall(0)).To(Equal("ccid1"))
-		Expect(fakeLauncher.LaunchArgsForCall(1)).To(Equal("ccid2"))
-		Expect(fakeLauncher.LaunchArgsForCall(2)).To(Equal("ccid3"))
+		ccid, shandler := fakeLauncher.LaunchArgsForCall(0)
+		Expect(ccid).To(Equal("ccid1"))
+		Expect(shandler).To(Equal(fakeStreamHandler))
+		ccid, shandler = fakeLauncher.LaunchArgsForCall(1)
+		Expect(ccid).To(Equal("ccid2"))
+		Expect(shandler).To(Equal(fakeStreamHandler))
+		ccid, shandler = fakeLauncher.LaunchArgsForCall(2)
+		Expect(ccid).To(Equal("ccid3"))
+		Expect(shandler).To(Equal(fakeStreamHandler))
 
 		Expect(fakeBuilder.BuildCallCount()).To(Equal(0))
 	})

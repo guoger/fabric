@@ -43,6 +43,7 @@ import (
 	"github.com/hyperledger/fabric/core/cclifecycle"
 	"github.com/hyperledger/fabric/core/chaincode"
 	"github.com/hyperledger/fabric/core/chaincode/accesscontrol"
+	"github.com/hyperledger/fabric/core/chaincode/extcc"
 	"github.com/hyperledger/fabric/core/chaincode/lifecycle"
 	"github.com/hyperledger/fabric/core/chaincode/persistence"
 	"github.com/hyperledger/fabric/core/chaincode/platforms"
@@ -596,21 +597,20 @@ func serve(args []string) error {
 	}
 
 	chaincodeLauncher := &chaincode.RuntimeLauncher{
-		Metrics:        chaincode.NewLaunchMetrics(opsSystem.Provider),
-		Registry:       chaincodeHandlerRegistry,
-		Runtime:        containerRuntime,
-		StartupTimeout: chaincodeConfig.StartupTimeout,
-		CertGenerator:  authenticator,
-		CACert:         ca.CertBytes(),
-		PeerAddress:    ccEndpoint,
+		Metrics:           chaincode.NewLaunchMetrics(opsSystem.Provider),
+		Registry:          chaincodeHandlerRegistry,
+		Runtime:           containerRuntime,
+		StartupTimeout:    chaincodeConfig.StartupTimeout,
+		CertGenerator:     authenticator,
+		CACert:            ca.CertBytes(),
+		PeerAddress:       ccEndpoint,
+		ConnectionHandler: &extcc.ExternalChaincodeRuntime{},
 	}
 
 	// Keep TestQueries working
 	if !chaincodeConfig.TLSEnabled {
 		chaincodeLauncher.CertGenerator = nil
 	}
-
-	go chaincodeCustodian.Work(buildRegistry, containerRouter, chaincodeLauncher)
 
 	chaincodeSupport := &chaincode.ChaincodeSupport{
 		ACLProvider:            aclProvider,
@@ -629,6 +629,8 @@ func serve(args []string) error {
 		TotalQueryLimit:        chaincodeConfig.TotalQueryLimit,
 		UserRunsCC:             userRunsCC,
 	}
+
+	go chaincodeCustodian.Work(buildRegistry, containerRouter, chaincodeLauncher, chaincodeSupport)
 
 	ccSupSrv := pb.ChaincodeSupportServer(chaincodeSupport)
 	if tlsEnabled {

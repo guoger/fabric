@@ -9,12 +9,13 @@ package lifecycle
 import (
 	"sync"
 
+	"github.com/hyperledger/fabric/core/chaincode/extcc"
 	"github.com/hyperledger/fabric/core/container"
 )
 
 //go:generate counterfeiter -o mock/chaincode_launcher.go --fake-name ChaincodeLauncher . ChaincodeLauncher
 type ChaincodeLauncher interface {
-	Launch(ccid string) error
+	Launch(ccid string, shandler extcc.StreamHandler) error
 }
 
 // ChaincodeCustodian is responsible for enqueuing builds and launches
@@ -70,7 +71,7 @@ func (cc *ChaincodeCustodian) Close() {
 	cc.cond.Signal()
 }
 
-func (cc *ChaincodeCustodian) Work(buildRegistry *container.BuildRegistry, builder ChaincodeBuilder, launcher ChaincodeLauncher) {
+func (cc *ChaincodeCustodian) Work(buildRegistry *container.BuildRegistry, builder ChaincodeBuilder, launcher ChaincodeLauncher, shandler extcc.StreamHandler) {
 	for {
 		cc.mutex.Lock()
 		if len(cc.choreQueue) == 0 && !cc.halt {
@@ -85,7 +86,7 @@ func (cc *ChaincodeCustodian) Work(buildRegistry *container.BuildRegistry, build
 		cc.mutex.Unlock()
 
 		if chore.runnable {
-			if err := launcher.Launch(chore.chaincodeID); err != nil {
+			if err := launcher.Launch(chore.chaincodeID, shandler); err != nil {
 				logger.Warningf("could not launch chaincode '%s': %s", chore.chaincodeID, err)
 			}
 		} else {

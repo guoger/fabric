@@ -4,14 +4,16 @@ package mock
 import (
 	"sync"
 
+	"github.com/hyperledger/fabric/core/chaincode/extcc"
 	"github.com/hyperledger/fabric/core/chaincode/lifecycle"
 )
 
 type ChaincodeLauncher struct {
-	LaunchStub        func(string) error
+	LaunchStub        func(string, extcc.StreamHandler) error
 	launchMutex       sync.RWMutex
 	launchArgsForCall []struct {
 		arg1 string
+		arg2 extcc.StreamHandler
 	}
 	launchReturns struct {
 		result1 error
@@ -23,16 +25,17 @@ type ChaincodeLauncher struct {
 	invocationsMutex sync.RWMutex
 }
 
-func (fake *ChaincodeLauncher) Launch(arg1 string) error {
+func (fake *ChaincodeLauncher) Launch(arg1 string, arg2 extcc.StreamHandler) error {
 	fake.launchMutex.Lock()
 	ret, specificReturn := fake.launchReturnsOnCall[len(fake.launchArgsForCall)]
 	fake.launchArgsForCall = append(fake.launchArgsForCall, struct {
 		arg1 string
-	}{arg1})
-	fake.recordInvocation("Launch", []interface{}{arg1})
+		arg2 extcc.StreamHandler
+	}{arg1, arg2})
+	fake.recordInvocation("Launch", []interface{}{arg1, arg2})
 	fake.launchMutex.Unlock()
 	if fake.LaunchStub != nil {
-		return fake.LaunchStub(arg1)
+		return fake.LaunchStub(arg1, arg2)
 	}
 	if specificReturn {
 		return ret.result1
@@ -47,17 +50,17 @@ func (fake *ChaincodeLauncher) LaunchCallCount() int {
 	return len(fake.launchArgsForCall)
 }
 
-func (fake *ChaincodeLauncher) LaunchCalls(stub func(string) error) {
+func (fake *ChaincodeLauncher) LaunchCalls(stub func(string, extcc.StreamHandler) error) {
 	fake.launchMutex.Lock()
 	defer fake.launchMutex.Unlock()
 	fake.LaunchStub = stub
 }
 
-func (fake *ChaincodeLauncher) LaunchArgsForCall(i int) string {
+func (fake *ChaincodeLauncher) LaunchArgsForCall(i int) (string, extcc.StreamHandler) {
 	fake.launchMutex.RLock()
 	defer fake.launchMutex.RUnlock()
 	argsForCall := fake.launchArgsForCall[i]
-	return argsForCall.arg1
+	return argsForCall.arg1, argsForCall.arg2
 }
 
 func (fake *ChaincodeLauncher) LaunchReturns(result1 error) {

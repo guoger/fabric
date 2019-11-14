@@ -16,6 +16,7 @@ import (
 	"github.com/hyperledger/fabric/common/chaincode"
 	commonledger "github.com/hyperledger/fabric/common/ledger"
 	"github.com/hyperledger/fabric/common/util"
+	extccmock "github.com/hyperledger/fabric/core/chaincode/extcc/mock"
 	"github.com/hyperledger/fabric/core/chaincode/lifecycle"
 	"github.com/hyperledger/fabric/core/chaincode/lifecycle/mock"
 	"github.com/hyperledger/fabric/core/chaincode/persistence"
@@ -384,7 +385,8 @@ var _ = Describe("Cache", func() {
 				Expect(err).NotTo(HaveOccurred())
 
 				fakeLauncher := &mock.ChaincodeLauncher{}
-				go chaincodeCustodian.Work(nil, nil, fakeLauncher)
+				fakeStreamHandler := &extccmock.StreamHandler{}
+				go chaincodeCustodian.Work(nil, nil, fakeLauncher, fakeStreamHandler)
 				Consistently(fakeLauncher.LaunchCallCount).Should(Equal(0))
 			})
 
@@ -403,7 +405,8 @@ var _ = Describe("Cache", func() {
 					}))
 
 					fakeLauncher := &mock.ChaincodeLauncher{}
-					go chaincodeCustodian.Work(nil, nil, fakeLauncher)
+					fakeStreamHandler := &extccmock.StreamHandler{}
+					go chaincodeCustodian.Work(nil, nil, fakeLauncher, fakeStreamHandler)
 					Eventually(fakeLauncher.LaunchCallCount).Should(Equal(1))
 				})
 
@@ -500,7 +503,8 @@ var _ = Describe("Cache", func() {
 				fakeLauncher := &mock.ChaincodeLauncher{}
 				fakeBuilder := &mock.ChaincodeBuilder{}
 				buildRegistry := &container.BuildRegistry{}
-				go chaincodeCustodian.Work(buildRegistry, fakeBuilder, fakeLauncher)
+				fakeStreamHandler := &extccmock.StreamHandler{}
+				go chaincodeCustodian.Work(buildRegistry, fakeBuilder, fakeLauncher, fakeStreamHandler)
 				Eventually(fakeBuilder.BuildCallCount).Should(Equal(1))
 				Eventually(fakeLauncher.LaunchCallCount).Should(Equal(1))
 			})
