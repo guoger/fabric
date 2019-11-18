@@ -18,5 +18,3 @@ BLD="$3"
 if [ -e "$SRC/metadata" ] ; then
   cp -a "$SRC/metadata" "$BLD"
 fi
-
-cp "$(jq -r .path "$META/metadata.json")" "$BLD/chaincode"

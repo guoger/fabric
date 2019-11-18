@@ -174,6 +174,9 @@ func InstallChaincode(n *Network, chaincode Chaincode, peers ...*Peer) {
 		chaincode.SetPackageIDFromPackageFile()
 	}
 
+	fmt.Printf("$$$$ PKG FILE: %s\n", chaincode.PackageFile)
+	fmt.Printf("$$$$ PKG ID: %s\n", chaincode.PackageID)
+
 	for _, p := range peers {
 		sess, err := n.PeerAdminSession(p, commands.ChaincodeInstall{
 			PackageFile: chaincode.PackageFile,

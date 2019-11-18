@@ -17,3 +17,10 @@ RELEASE="$2"
 if [ -d "$BLD/metadata" ] ; then
    cp -a "$BLD/metadata/"* "$RELEASE"
 fi
+
+mkdir -p "$RELEASE/chaincode/server"
+cat << EOF > "$RELEASE/chaincode/server/connection.json"
+{
+  "address": "contract-default.159.23.66.2.xip.io:80"
+}
+EOF
