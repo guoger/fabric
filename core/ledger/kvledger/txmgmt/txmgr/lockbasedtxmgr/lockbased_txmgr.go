@@ -7,6 +7,7 @@ package lockbasedtxmgr
 
 import (
 	"bytes"
+	"fmt"
 	"sync"
 
 	"github.com/golang/protobuf/proto"
@@ -577,9 +578,11 @@ func (txmgr *LockBasedTxMgr) CommitLostBlock(blockAndPvtdata *ledger.BlockAndPvt
 func extractStateUpdates(batch *privacyenabledstate.UpdateBatch, namespaces []string) ledger.StateUpdates {
 	su := make(ledger.StateUpdates)
 	for _, namespace := range namespaces {
+		fmt.Printf("#### interested in ns: %s\n", namespace)
 		nsu := &ledger.KVStateUpdates{}
 		// include public updates
 		for key, versionedValue := range batch.PubUpdates.GetUpdates(namespace) {
+			fmt.Printf("#### key %s in ns %s is updated\n", key, namespace)
 			nsu.PublicUpdates = append(nsu.PublicUpdates,
 				&kvrwset.KVWrite{
 					Key:      key,
@@ -590,6 +593,7 @@ func extractStateUpdates(batch *privacyenabledstate.UpdateBatch, namespaces []st
 		}
 		// include colls hashes updates
 		if hashUpdates, ok := batch.HashUpdates.UpdateMap[namespace]; ok {
+			fmt.Printf("#### has hash update for ns %s\n", namespace)
 			nsu.CollHashUpdates = make(map[string][]*kvrwset.KVWriteHash)
 			for _, collName := range hashUpdates.GetCollectionNames() {
 				for key, vv := range hashUpdates.GetUpdates(collName) {
@@ -603,11 +607,14 @@ func extractStateUpdates(batch *privacyenabledstate.UpdateBatch, namespaces []st
 					)
 				}
 			}
+		} else {
+			fmt.Printf("#### No hash update for ns %s\n", namespace)
 		}
 		if len(nsu.PublicUpdates)+len(nsu.CollHashUpdates) > 0 {
 			su[namespace] = nsu
 		}
 	}
+	fmt.Printf("#### Resulting state updates in namespaces: %+v\n", su)
 	return su
 }
 

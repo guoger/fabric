@@ -118,7 +118,9 @@ var _ = Describe("EndToEnd", func() {
 			}
 		})
 
-		It("executes a basic solo network with 2 orgs and no docker", func() {
+		FIt("executes a basic solo network with 2 orgs and no docker", func() {
+			SetDefaultEventuallyPollingInterval(time.Second)
+
 			By("getting the orderer by name")
 			orderer := network.Orderer("orderer")
 
@@ -129,24 +131,32 @@ var _ = Describe("EndToEnd", func() {
 			By("deploying the chaincode")
 			nwo.DeployChaincode(network, "testchannel", orderer, chaincode)
 
-			By("getting the client peer by name")
-			peer := network.Peer("Org1", "peer0")
+			By("Some more operations")
+			chaincode.Sequence = "2"
+			chaincode.PackageID = "another-pkg"
+			nwo.ApproveChaincodeForMyOrg(network, "testchannel", orderer, chaincode, network.PeersWithChannel("testchannel")...)
 
-			RunQueryInvokeQuery(network, orderer, peer, "testchannel")
-			RunRespondWith(network, orderer, peer, "testchannel")
+			chaincode.PackageID = "yet-another-pkg"
+			nwo.ApproveChaincodeForMyOrg(network, "testchannel", orderer, chaincode, network.PeersWithChannel("testchannel")...)
 
-			By("waiting for DeliverFiltered stats to be emitted")
-			metricsWriteInterval := 5 * time.Second
-			Eventually(datagramReader, 2*metricsWriteInterval).Should(gbytes.Say("stream_request_duration.protos_Deliver.DeliverFiltered."))
-
-			CheckPeerStatsdStreamMetrics(datagramReader.String())
-			CheckPeerStatsdMetrics(datagramReader.String(), "org1_peer0")
-			CheckPeerStatsdMetrics(datagramReader.String(), "org2_peer0")
-			CheckOrdererStatsdMetrics(datagramReader.String(), "ordererorg_orderer")
-
-			By("setting up a channel from a base profile")
-			additionalPeer := network.Peer("Org2", "peer0")
-			network.CreateChannel("baseprofilechannel", orderer, peer, additionalPeer)
+			//By("getting the client peer by name")
+			//peer := network.Peer("Org1", "peer0")
+			//
+			//RunQueryInvokeQuery(network, orderer, peer, "testchannel")
+			//RunRespondWith(network, orderer, peer, "testchannel")
+			//
+			//By("waiting for DeliverFiltered stats to be emitted")
+			//metricsWriteInterval := 5 * time.Second
+			//Eventually(datagramReader, 2*metricsWriteInterval).Should(gbytes.Say("stream_request_duration.protos_Deliver.DeliverFiltered."))
+			//
+			//CheckPeerStatsdStreamMetrics(datagramReader.String())
+			//CheckPeerStatsdMetrics(datagramReader.String(), "org1_peer0")
+			//CheckPeerStatsdMetrics(datagramReader.String(), "org2_peer0")
+			//CheckOrdererStatsdMetrics(datagramReader.String(), "ordererorg_orderer")
+			//
+			//By("setting up a channel from a base profile")
+			//additionalPeer := network.Peer("Org2", "peer0")
+			//network.CreateChannel("baseprofilechannel", orderer, peer, additionalPeer)
 		})
 	})
 

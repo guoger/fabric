@@ -340,7 +340,7 @@ var _ = Describe("Cache", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("sets the definitions from the state", func() {
+		FIt("sets the definitions from the state", func() {
 			err := c.Initialize("channel-id", fakeQueryExecutor)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(channelCache.Chaincodes["chaincode-name"].Definition.Sequence).To(Equal(int64(7)))

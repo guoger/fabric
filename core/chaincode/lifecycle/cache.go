@@ -256,6 +256,7 @@ func (c *Cache) handleChaincodeInstalledWhileLocked(initializing bool, md *persi
 // HandleStateUpdates is required to implement the ledger state listener interface.  It applies
 // any state updates to the cache.
 func (c *Cache) HandleStateUpdates(trigger *ledger.StateUpdateTrigger) error {
+	fmt.Printf("#### Handle state udpate from block %d\n", trigger.CommittingBlockNum)
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	channelID := trigger.LedgerID
@@ -275,11 +276,16 @@ func (c *Cache) HandleStateUpdates(trigger *ledger.StateUpdateTrigger) error {
 		dirtyChaincodes[matches[1]] = struct{}{}
 	}
 
+	fmt.Printf("#### dirty cc 1: %+v\n", dirtyChaincodes)
+
 	channelCache, ok := c.definedChaincodes[channelID]
+
+	fmt.Printf("#### channel cache exists: %t\n", ok)
 
 	// if the channel cache does not yet exist, there are no interesting hashes, so skip
 	if ok {
 		for collection, privateUpdates := range updates.CollHashUpdates {
+			fmt.Printf("#### collection: %s\n", collection)
 			matches := ImplicitCollectionMatcher.FindStringSubmatch(collection)
 			if len(matches) != 2 {
 				// This is not an implicit collection
@@ -299,6 +305,8 @@ func (c *Cache) HandleStateUpdates(trigger *ledger.StateUpdateTrigger) error {
 			}
 		}
 	}
+
+	fmt.Printf("#### dirty cc 2: %+v\n", dirtyChaincodes)
 
 	err := c.update(false, channelID, dirtyChaincodes, trigger.PostCommitQueryExecutor)
 	if err != nil {
