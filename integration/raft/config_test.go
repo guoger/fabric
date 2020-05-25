@@ -1077,6 +1077,75 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 			Expect(resp.Status).To(Equal(common.Status_SUCCESS))
 		})
 
+		When("evicted node is added back while it's offline", func() {
+			It("can starts with correct new raft id", func() {
+				o1 := network.Orderer("orderer1")
+				o2 := network.Orderer("orderer2")
+				o3 := network.Orderer("orderer3")
+
+				orderers := []*nwo.Orderer{o1, o2, o3}
+
+				By("Waiting for them to elect a leader")
+				findLeader(ordererRunners)
+
+				By("Creating a channel")
+				network.CreateChannel("testchannel", o1, peer)
+
+				assertBlockReception(map[string]int{
+					"testchannel":   0,
+					"systemchannel": 1,
+				}, []*nwo.Orderer{o1, o2, o3}, peer, network)
+
+				By("Killing the orderer")
+				ordererProcesses[0].Signal(syscall.SIGTERM)
+				Eventually(ordererProcesses[0].Wait(), network.EventuallyTimeout).Should(Receive())
+
+				// We need to wait for stabilization, as we might have killed the leader OSN.
+				By("Waiting for the channel to stabilize after killing the orderer")
+				assertBlockReception(map[string]int{
+					"testchannel":   0,
+					"systemchannel": 1,
+				}, []*nwo.Orderer{o2, o3}, peer, network)
+
+				By("Removing the first orderer from an application channel")
+				extendNetwork(network)
+				certificatesOfOrderers := refreshOrdererPEMs(network)
+				removeConsenter(network, peer, o2, "testchannel", certificatesOfOrderers[0].oldCert)
+
+				certPath := certificatesOfOrderers[0].dstFile
+				keyFile := strings.Replace(certPath, "server.crt", "server.key", -1)
+				err := ioutil.WriteFile(certPath, certificatesOfOrderers[0].oldCert, 0644)
+				Expect(err).To(Not(HaveOccurred()))
+				err = ioutil.WriteFile(keyFile, certificatesOfOrderers[0].oldKey, 0644)
+				Expect(err).To(Not(HaveOccurred()))
+
+				By("Adding the evicted orderer back to the application channel")
+				addConsenter(network, peer, o2, "testchannel", etcdraft.Consenter{
+					ServerTlsCert: certificatesOfOrderers[0].oldCert,
+					ClientTlsCert: certificatesOfOrderers[0].oldCert,
+					Host:          "127.0.0.1",
+					Port:          uint32(network.OrdererPort(orderers[0], nwo.ClusterPort)),
+				})
+
+				By("Starting the orderer again")
+				ordererRunner := network.OrdererRunner(orderers[0])
+				ordererRunners[0] = ordererRunner
+				ordererProcesses[0] = ifrit.Invoke(ordererRunner)
+				Eventually(ordererProcesses[0].Ready(), network.EventuallyTimeout).Should(BeClosed())
+
+				By("Submitting tx")
+				env := CreateBroadcastEnvelope(network, o2, "testchannel", []byte("foo"))
+				resp, err := nwo.Broadcast(network, o2, env)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp.Status).To(Equal(common.Status_SUCCESS))
+
+				By("Waiting for the channel to stabilize")
+				assertBlockReception(map[string]int{
+					"testchannel": 3,
+				}, []*nwo.Orderer{o1, o2, o3}, peer, network)
+			})
+		})
+
 		It("notices it even if it is down at the time of its eviction", func() {
 			o1 := network.Orderer("orderer1")
 			o2 := network.Orderer("orderer2")
